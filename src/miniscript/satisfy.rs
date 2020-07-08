@@ -101,6 +101,11 @@ pub trait Satisfier<Pk: MiniscriptKey + ToPublicKey> {
     fn check_after(&self, _: u32) -> bool {
         false
     }
+
+    /// Assert if tx template is satisfied
+    fn check_tx_template(&self, _:sha256::Hash) -> bool {
+        false
+    }
 }
 
 // Allow use of `()` as a "no conditions available" satisfier
@@ -145,6 +150,17 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for After {
         }
     }
 }
+
+/// Newtype around `sha256::Hash` which implements `Satisfier` using `h` as an
+/// transaction template hash
+pub struct TxTemplate(sha256::Hash);
+
+impl<Pk: MiniscriptKey> Satisfier<Pk> for TxTemplate {
+    fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        h == self.0
+    }
+}
+
 
 impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for HashMap<Pk, BitcoinSig> {
     fn lookup_sig(&self, key: &Pk) -> Option<BitcoinSig> {
@@ -947,6 +963,14 @@ impl Satisfaction {
                     }
                 }
             }
+            Terminal::TxTemplate(h) => Satisfaction {
+                stack: if stfr.check_tx_template(h) {
+                    Witness::empty()
+                } else {
+                    Witness::Unavailable
+                },
+                has_sig: false,
+            },
         }
     }
 
@@ -1061,6 +1085,10 @@ impl Satisfaction {
             },
             Terminal::Multi(k, _) => Satisfaction {
                 stack: Witness::Stack(vec![vec![]; k + 1]),
+                has_sig: false,
+            },
+            Terminal::TxTemplate(_) => Satisfaction {
+                stack: Witness::Unavailable,
                 has_sig: false,
             },
         }

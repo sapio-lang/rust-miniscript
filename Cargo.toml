@@ -32,3 +32,8 @@ name = "sign_multisig"
 
 [[example]]
 name = "verify_tx"
+
+
+[lib]
+name = "libminiscript"
+crate-type = ["dylib"]

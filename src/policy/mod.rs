@@ -169,6 +169,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Terminal<Pk, Ctx> {
             Terminal::Multi(k, ref keys) | Terminal::MultiA(k, ref keys) => {
                 Semantic::Threshold(k, keys.iter().map(|k| Semantic::Key(k.clone())).collect())
             }
+            Terminal::TxTemplate(h) => Semantic::TxTemplate(h),
         }
         .normalized();
         Ok(ret)
@@ -222,6 +223,7 @@ impl<Pk: MiniscriptKey> Liftable<Pk> for Concrete<Pk> {
                 let semantic_subs: Result<_, Error> = subs.iter().map(Liftable::lift).collect();
                 Semantic::Threshold(k, semantic_subs?)
             }
+            Concrete::TxTemplate(h) => Semantic::TxTemplate(h),
         }
         .normalized();
         Ok(ret)

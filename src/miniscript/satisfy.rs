@@ -20,7 +20,7 @@
 
 use core::{cmp, i64, mem};
 
-use bitcoin::hashes::hash160;
+use bitcoin::hashes::{hash160, sha256};
 use bitcoin::secp256k1::XOnlyPublicKey;
 use bitcoin::util::taproot::{ControlBlock, LeafVersion, TapLeafHash};
 use bitcoin::{LockTime, Sequence};
@@ -116,6 +116,11 @@ pub trait Satisfier<Pk: MiniscriptKey + ToPublicKey> {
     fn check_after(&self, _: LockTime) -> bool {
         false
     }
+
+    /// Assert if tx template is satisfied
+    fn check_tx_template(&self, _: sha256::Hash) -> bool {
+        false
+    }
 }
 
 // Allow use of `()` as a "no conditions available" satisfier
@@ -159,6 +164,16 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for LockTime {
 impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for HashMap<Pk, bitcoin::EcdsaSig> {
     fn lookup_ecdsa_sig(&self, key: &Pk) -> Option<bitcoin::EcdsaSig> {
         self.get(key).copied()
+    }
+}
+
+/// Newtype around `sha256::Hash` which implements `Satisfier` using `h` as an
+/// transaction template hash
+pub struct TxTemplate(sha256::Hash);
+
+impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for TxTemplate {
+    fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        h == self.0
     }
 }
 
@@ -1214,6 +1229,14 @@ impl Satisfaction {
                     }
                 }
             }
+            Terminal::TxTemplate(h) => Satisfaction {
+                stack: if stfr.check_tx_template(h) {
+                    Witness::empty()
+                } else {
+                    Witness::Unavailable
+                },
+                has_sig: true,
+            },
         }
     }
 
@@ -1390,6 +1413,10 @@ impl Satisfaction {
             Terminal::MultiA(_, ref pks) => Satisfaction {
                 stack: Witness::Stack(vec![vec![]; pks.len()]),
                 has_sig: false,
+            },
+            Terminal::TxTemplate(_) => Satisfaction {
+                stack: Witness::Unavailable,
+                has_sig: true,
             },
         }
     }

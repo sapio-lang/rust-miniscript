@@ -17,6 +17,8 @@
 use core::str::FromStr;
 use core::{fmt, str};
 
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::sha256;
 use bitcoin::{LockTime, PackedLockTime, Sequence};
 
 use super::concrete::PolicyError;
@@ -52,6 +54,8 @@ pub enum Policy<Pk: MiniscriptKey> {
     Hash160(Pk::Hash160),
     /// A set of descriptors, satisfactions must be provided for `k` of them
     Threshold(usize, Vec<Policy<Pk>>),
+    /// A SHA256 whose must match the tx template
+    TxTemplate(sha256::Hash),
 }
 
 impl<Pk> Policy<Pk>
@@ -84,7 +88,8 @@ impl<Pk: MiniscriptKey> ForEachKey<Pk> for Policy<Pk> {
             | Policy::Ripemd160(..)
             | Policy::Hash160(..)
             | Policy::After(..)
-            | Policy::Older(..) => true,
+            | Policy::Older(..)
+            | Policy::TxTemplate(..) => true,
             Policy::Threshold(_, ref subs) => subs.iter().all(|sub| sub.for_each_key(&mut pred)),
         }
     }
@@ -161,6 +166,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     subs.iter().map(|sub| sub._translate_pk(t)).collect();
                 new_subs.map(|ok| Policy::Threshold(k, ok))
             }
+            Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
         }
     }
 
@@ -278,6 +284,7 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -311,6 +318,7 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -404,6 +412,10 @@ impl_from_tree!(
                 }
                 Ok(Policy::Threshold(thresh as usize, subs))
             }
+            ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
+                sha256::Hash::from_hex(x).map(Policy::TxTemplate)
+            }),
+
             _ => Err(errstr(top.name)),
         }
     }
@@ -496,7 +508,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) => vec![],
+            | Policy::Hash160(..)
+            | Policy::TxTemplate(..) => vec![],
             Policy::After(..) => vec![],
             Policy::Older(t) => vec![t.to_consensus_u32()],
             Policy::Threshold(_, ref subs) => subs.iter().fold(vec![], |mut acc, x| {
@@ -524,7 +537,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) => vec![],
+            | Policy::Hash160(..)
+            | Policy::TxTemplate(..) => vec![],
             Policy::Older(..) => vec![],
             Policy::After(t) => vec![t.0],
             Policy::Threshold(_, ref subs) => subs.iter().fold(vec![], |mut acc, x| {
@@ -604,7 +618,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) => 0,
+            | Policy::Hash160(..)
+            | Policy::TxTemplate(..) => 0,
             Policy::Threshold(_, ref subs) => subs.iter().map(|sub| sub.n_keys()).sum::<usize>(),
         }
     }
@@ -622,7 +637,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) => Some(0),
+            | Policy::Hash160(..)
+            | Policy::TxTemplate(..) => Some(0),
             Policy::Threshold(k, ref subs) => {
                 let mut sublens: Vec<usize> =
                     subs.iter().filter_map(Policy::minimum_n_keys).collect();

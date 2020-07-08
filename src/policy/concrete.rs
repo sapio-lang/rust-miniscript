@@ -64,6 +64,8 @@ pub enum Policy<Pk: MiniscriptKey> {
     Or(Vec<(usize, Policy<Pk>)>),
     /// A set of descriptors, satisfactions must be provided for `k` of them
     Threshold(usize, Vec<Policy<Pk>>),
+    /// A SHA256 whose must match the tx template
+    TxTemplate(sha256::Hash),
 }
 
 /// Detailed Error type for Policies
@@ -154,7 +156,8 @@ impl<Pk: MiniscriptKey> ForEachKey<Pk> for Policy<Pk> {
             | Policy::Ripemd160(..)
             | Policy::Hash160(..)
             | Policy::After(..)
-            | Policy::Older(..) => true,
+            | Policy::Older(..)
+            | Policy::TxTemplate(..) => true,
             Policy::Threshold(_, ref subs) | Policy::And(ref subs) => {
                 subs.iter().all(|sub| sub.for_each_key(&mut pred))
             }
@@ -225,6 +228,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     .map(|&(ref prob, ref sub)| Ok((*prob, sub._translate_pk(translatefpk)?)))
                     .collect::<Result<Vec<(usize, Policy<Q>)>, E>>()?,
             )),
+            Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
         }
     }
 
@@ -289,6 +293,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(_)
             | Policy::Hash256(_)
             | Policy::Ripemd160(_)
+            // TODO: Correct this to be accurate
+            | Policy::TxTemplate(_)
             | Policy::Hash160(_) => TimeLockInfo::default(),
             Policy::After(t) => TimeLockInfo {
                 csv_with_height: false,
@@ -418,6 +424,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     });
                 (all_safe, atleast_one_safe && all_non_mall)
             }
+            Policy::TxTemplate(_) => (true, true),
         }
     }
 }
@@ -461,6 +468,7 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -504,6 +512,7 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -638,6 +647,9 @@ where
                 }
                 Ok(Policy::Threshold(thresh as usize, subs))
             }
+            ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
+                sha256::Hash::from_hex(x).map(Policy::TxTemplate)
+            }),
             _ => Err(errstr(top.name)),
         }
         .map(|res| (frag_prob, res))

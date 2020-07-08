@@ -279,6 +279,24 @@ impl Property for ExtData {
         }
     }
 
+    fn from_txtemplate() -> Self {
+        ExtData {
+            pk_cost: 33 + 2,
+            has_free_verify: false,
+            ops_count_static: 3,
+            ops_count_sat: Some(3),
+            ops_count_nsat: None,
+            max_sat_size: Some((0, 0)),
+            stack_elem_count_sat: Some(0),
+            stack_elem_count_dissat: None,
+            max_dissat_size: None,
+            // TODO: Correct this to read from the template
+            timelock_info: TimeLockInfo::default(),
+            exec_stack_elem_count_sat: Some(1),
+            exec_stack_elem_count_dissat: None,
+        }
+    }
+
     fn from_hash256() -> Self {
         ExtData {
             pk_cost: 33 + 6,
@@ -1122,6 +1140,7 @@ impl Property for ExtData {
                     error: kind,
                 })
             }
+            Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()

@@ -38,6 +38,7 @@ pub enum Token<'s> {
     CheckMultiSig,
     CheckSequenceVerify,
     CheckLockTimeVerify,
+    CheckTemplateVerify,
     FromAltStack,
     ToAltStack,
     Drop,
@@ -167,6 +168,9 @@ pub fn lex(script: &'_ script::Script) -> Result<Vec<Token<'_>>, Error> {
             }
             script::Instruction::Op(op) if op == opcodes::all::OP_CLTV => {
                 ret.push(Token::CheckLockTimeVerify);
+            }
+            script::Instruction::Op(op) if op == opcodes::all::OP_NOP4 => {
+                ret.push(Token::CheckTemplateVerify);
             }
             script::Instruction::Op(opcodes::all::OP_FROMALTSTACK) => {
                 ret.push(Token::FromAltStack);

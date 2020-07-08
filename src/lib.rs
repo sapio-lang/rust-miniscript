@@ -110,6 +110,35 @@ pub use miniscript::decode::Terminal;
 pub use miniscript::satisfy::{BitcoinSig, Satisfier};
 pub use miniscript::Miniscript;
 
+
+use std::ffi;
+use std::os::raw::c_char;
+use policy::{Liftable, Concrete};
+#[cfg(feature = "compiler")]
+#[no_mangle]
+pub extern fn make_policy(s: *const c_char, len: *mut usize, out: *mut (*const u8)) -> *mut [u8]{
+    let string = unsafe{ffi::CStr::from_ptr(s)};
+    let bstr = string.to_str().unwrap();
+    let d = Descriptor::Wsh(policy::Concrete::<bitcoin::PublicKey>::from_str(bstr).unwrap().compile().unwrap());
+    let script = d.witness_script().into_bytes().into_boxed_slice();
+    println!("{:?}", script);
+    unsafe {
+        *len = script.len();
+        *out = script.as_ptr();
+    }
+    Box::into_raw(script)
+}
+
+#[cfg(feature = "compiler")]
+#[no_mangle]
+pub extern fn deallocate_policy(a:*mut [u8]) {
+    unsafe{
+        let b : Box<[u8]> = Box::from_raw(a);
+    }
+}
+
+
+
 ///Public key trait which can be converted to Hash type
 pub trait MiniscriptKey:
     Clone + Eq + Ord + str::FromStr + fmt::Debug + fmt::Display + hash::Hash

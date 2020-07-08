@@ -126,6 +126,9 @@ pub enum Terminal<Pk: MiniscriptKey, Ctx: ScriptContext> {
     Thresh(usize, Vec<Arc<Miniscript<Pk, Ctx>>>),
     /// k (<key>)* n CHECKMULTISIG
     Multi(usize, Vec<Pk>),
+    // Other
+    /// `<hash> OP_CHECKTEMPLATEVERIFY OP_DROP`
+    TxTemplate(sha256::Hash),
 }
 
 macro_rules! match_token {

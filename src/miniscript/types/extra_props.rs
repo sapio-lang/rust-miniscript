@@ -103,6 +103,16 @@ impl Property for ExtData {
         }
     }
 
+    fn from_txtemplate() -> Self {
+        ExtData {
+            pk_cost: 33 + 2,
+            has_verify_form: true,
+            ops_count_static: 3,
+            ops_count_sat: Some(3),
+            ops_count_nsat: None,
+        }
+    }
+
     fn from_hash256() -> Self {
         ExtData {
             pk_cost: 33 + 6,
@@ -530,6 +540,7 @@ impl Property for ExtData {
                     error: kind,
                 })
             }
+            Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()

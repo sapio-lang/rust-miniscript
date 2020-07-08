@@ -122,9 +122,9 @@ pub extern "C" fn make_policy(
 ) -> *mut [u8] {
     let string = unsafe { ffi::CStr::from_ptr(s) };
     let bstr = string.to_str().unwrap();
-    let d = Descriptor::Wsh(policy::Concrete::<bitcoin::PublicKey>::from_str(bstr).unwrap().compile().unwrap());
+    let w = policy::Concrete::<bitcoin::PublicKey>::from_str(bstr).unwrap();
+    let d = Descriptor::Wsh(w.compile().unwrap());
     let script = d.witness_script().into_bytes().into_boxed_slice();
-    println!("{:?}", script);
     unsafe {
         *len = script.len();
         *out = script.as_ptr();

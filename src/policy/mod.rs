@@ -95,6 +95,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Terminal<Pk, Ctx> {
                     .map(|k| Semantic::KeyHash(k.to_pubkeyhash()))
                     .collect(),
             ),
+            Terminal::TxTemplate(h) => Semantic::TxTemplate(h),
         }
         .normalized()
     }
@@ -136,6 +137,7 @@ impl<Pk: MiniscriptKey> Liftable<Pk> for Concrete<Pk> {
             Concrete::Threshold(k, ref subs) => {
                 Semantic::Threshold(k, subs.iter().map(Liftable::lift).collect())
             }
+            Concrete::TxTemplate(h) => Semantic::TxTemplate(h)
         }
         .normalized()
     }

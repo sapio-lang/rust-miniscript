@@ -57,6 +57,8 @@ pub enum Policy<Pk: MiniscriptKey> {
     Or(Vec<(usize, Policy<Pk>)>),
     /// A set of descriptors, satisfactions must be provided for `k` of them
     Threshold(usize, Vec<Policy<Pk>>),
+    /// A SHA256 whose must match the tx template
+    TxTemplate(sha256::Hash),
 }
 
 /// Detailed Error type for Policies
@@ -147,6 +149,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     .map(|&(ref prob, ref sub)| Ok((*prob, sub.translate_pk(&mut translatefpk)?)))
                     .collect::<Result<Vec<(usize, Policy<Q>)>, E>>()?,
             )),
+            Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
         }
     }
 
@@ -242,6 +245,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     });
                 (all_safe, atleast_one_safe && all_non_mall)
             }
+            Policy::TxTemplate(_) => (true, true),
         }
     }
 }
@@ -283,6 +287,7 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -324,6 +329,7 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
                 }
                 f.write_str(")")
             }
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
         }
     }
 }
@@ -450,6 +456,9 @@ where
                 }
                 Ok(Policy::Threshold(thresh as usize, subs))
             }
+            ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
+                sha256::Hash::from_hex(x).map(Policy::TxTemplate)
+            }),
             _ => Err(errstr(top.name)),
         }
         .map(|res| (frag_prob, res))

@@ -266,6 +266,12 @@ pub trait Property: Sized {
         Self::from_hash()
     }
 
+    /// Type property of a `TxTemplate` hash. Default implementation simply
+    /// passes through to `from_txtemplate`
+    fn from_txtemplate() -> Self {
+        Self::from_txtemplate()
+    }
+
     /// Type property of a `Hash256` hash. Default implementation simply
     /// passes through to `from_hash`
     fn from_hash256() -> Self {
@@ -508,6 +514,7 @@ pub trait Property: Sized {
                     error: kind,
                 })
             }
+            Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()
@@ -570,6 +577,13 @@ impl Property for Type {
         Type {
             corr: Property::from_sha256(),
             mall: Property::from_sha256(),
+        }
+    }
+
+    fn from_txtemplate() -> Self {
+        Type {
+            corr: Property::from_txtemplate(),
+            mall: Property::from_txtemplate(),
         }
     }
 
@@ -876,6 +890,7 @@ impl Property for Type {
                     error: kind,
                 })
             }
+            Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()

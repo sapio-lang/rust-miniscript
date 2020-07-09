@@ -291,7 +291,7 @@ impl Property for ExtData {
     fn from_txtemplate() -> Self {
         ExtData {
             pk_cost: 33 + 2,
-            has_free_verify: true,
+            has_free_verify: false,
             ops: OpLimits::new(3, Some(3), None),
             // TODO: Correct this to read from the template
             timelock_info: TimelockInfo::default(),

@@ -266,12 +266,6 @@ pub trait Property: Sized {
         Self::from_hash()
     }
 
-    /// Type property of a `TxTemplate` hash. Default implementation simply
-    /// passes through to `from_txtemplate`
-    fn from_txtemplate() -> Self {
-        Self::from_txtemplate()
-    }
-
     /// Type property of a `Hash256` hash. Default implementation simply
     /// passes through to `from_hash`
     fn from_hash256() -> Self {
@@ -304,6 +298,9 @@ pub trait Property: Sized {
     fn from_older(t: u32) -> Self {
         Self::from_time(t)
     }
+
+    /// Type property of a `TxTemplate` hash.
+    fn from_txtemplate() -> Self;
 
     /// Cast using the `Alt` wrapper
     fn cast_alt(self) -> Result<Self, ErrorKind>;

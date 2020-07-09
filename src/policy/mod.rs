@@ -137,7 +137,7 @@ impl<Pk: MiniscriptKey> Liftable<Pk> for Concrete<Pk> {
             Concrete::Threshold(k, ref subs) => {
                 Semantic::Threshold(k, subs.iter().map(Liftable::lift).collect())
             }
-            Concrete::TxTemplate(h) => Semantic::TxTemplate(h)
+            Concrete::TxTemplate(h) => Semantic::TxTemplate(h),
         }
         .normalized()
     }

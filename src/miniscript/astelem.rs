@@ -143,13 +143,12 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                     })
                     .collect();
                 Terminal::Thresh(k, subs?)
-            },
+            }
             Terminal::Multi(k, ref keys) => {
                 let keys: Result<Vec<Q>, _> = keys.iter().map(&mut *translatefpk).collect();
                 Terminal::Multi(k, keys?)
-            },
+            }
             Terminal::TxTemplate(x) => Terminal::TxTemplate(x),
-
         };
         Ctx::check_frag_validity(&frag).expect(
             "Translated fragment not valid.\n
@@ -246,10 +245,8 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Debug for Terminal<Pk, Ctx> {
                         write!(f, ",{:?}", k)?;
                     }
                     f.write_str(")")
-                },
-                Terminal::TxTemplate(x) => {
-                    write!(f, "txtmpl({})", x)
                 }
+                Terminal::TxTemplate(x) => write!(f, "txtmpl({})", x),
 
                 _ => unreachable!(),
             }
@@ -307,9 +304,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Display for Terminal<Pk, Ctx> {
                 }
                 f.write_str(")")
             }
-            Terminal::TxTemplate(x) => {
-                write!(f, "txtmpl({})", x)
-            }
+            Terminal::TxTemplate(x) => write!(f, "txtmpl({})", x),
             // wrappers
             _ => {
                 if let Some((ch, sub)) = self.wrap_char() {

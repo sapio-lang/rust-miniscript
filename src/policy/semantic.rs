@@ -94,7 +94,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     .map(|sub| sub.translate_pkh(&mut translatefpkh))
                     .collect::<Result<Vec<Policy<Q>>, E>>()?,
             )),
-            Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone()))
+            Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
         }
     }
 }
@@ -352,7 +352,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) 
+            | Policy::Hash160(..)
             | Policy::TxTemplate(..) => vec![],
             Policy::After(..) => vec![],
             Policy::Older(t) => vec![t],
@@ -432,7 +432,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Sha256(..)
             | Policy::Hash256(..)
             | Policy::Ripemd160(..)
-            | Policy::Hash160(..) 
+            | Policy::Hash160(..)
             | Policy::TxTemplate(..) => 0,
             Policy::And(ref subs) => subs.iter().map(Policy::minimum_n_keys).sum(),
             Policy::Or(ref subs) => subs.iter().map(Policy::minimum_n_keys).min().unwrap_or(0),

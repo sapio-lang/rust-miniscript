@@ -85,7 +85,7 @@ pub trait Satisfier<Pk: MiniscriptKey> {
     }
 
     /// Assert if tx template is satisfied
-    fn check_tx_template(&self, _:sha256::Hash) -> bool {
+    fn check_tx_template(&self, _: sha256::Hash) -> bool {
         false
     }
 }
@@ -122,9 +122,6 @@ impl<Pk: MiniscriptKey> Satisfier<Pk> for TxTemplate {
         h == self.0
     }
 }
-
-
-
 
 impl<Pk: MiniscriptKey> Satisfier<Pk> for HashMap<Pk, BitcoinSig> {
     fn lookup_sig(&self, key: &Pk) -> Option<BitcoinSig> {

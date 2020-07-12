@@ -113,30 +113,42 @@ pub use miniscript::Miniscript;
 use policy::{Concrete, Liftable};
 use std::ffi;
 use std::os::raw::c_char;
+use std::ptr;
+
+#[cfg(feature = "compiler")]
+#[repr(transparent)]
+pub struct FFIHandle(Box<[u8]>);
+
 #[cfg(feature = "compiler")]
 #[no_mangle]
 pub extern "C" fn make_policy(
     s: *const c_char,
     len: *mut usize,
     out: *mut (*const u8),
-) -> *mut [u8] {
+) -> *mut FFIHandle {
     let string = unsafe { ffi::CStr::from_ptr(s) };
-    let bstr = string.to_str().unwrap();
-    let w = policy::Concrete::<bitcoin::PublicKey>::from_str(bstr).unwrap();
-    let d = Descriptor::Wsh(w.compile().unwrap());
-    let script = d.witness_script().into_bytes().into_boxed_slice();
-    unsafe {
-        *len = script.len();
-        *out = script.as_ptr();
+    if let Ok(bstr) = string.to_str() {
+        if let Ok(w) = policy::Concrete::<bitcoin::PublicKey>::from_str(bstr){
+            if let Ok(d) = w.compile().map(Descriptor::Wsh) {
+                let script = d.witness_script().into_bytes().into_boxed_slice();
+                unsafe {
+                    *len = script.len();
+                    *out = script.as_ptr();
+                }
+                return Box::into_raw(Box::new(FFIHandle(script)));
+            }
+
+        }
+
     }
-    Box::into_raw(script)
+    ptr::null_mut()
 }
 
 #[cfg(feature = "compiler")]
 #[no_mangle]
-pub extern "C" fn deallocate_policy(a: *mut [u8]) {
+pub extern "C" fn deallocate_policy(a: *mut FFIHandle) {
     unsafe {
-        let b: Box<[u8]> = Box::from_raw(a);
+        let b: Box<FFIHandle> = Box::from_raw(a);
     }
 }
 

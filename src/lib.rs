@@ -113,6 +113,10 @@ extern crate core;
 
 #[cfg(feature = "serde")]
 pub use actual_serde as serde;
+#[cfg(feature = "schemars")]
+pub extern crate schemars;
+#[cfg(feature = "serde")]
+pub extern crate serde;
 #[cfg(all(test, feature = "unstable"))]
 extern crate test;
 

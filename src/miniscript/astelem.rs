@@ -91,6 +91,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
             | Terminal::Hash256(..)
             | Terminal::Ripemd160(..)
             | Terminal::Hash160(..)
+            | Terminal::TxTemplate(..)
             | Terminal::True
             | Terminal::False
             | Terminal::TxTemplate(..) => true,

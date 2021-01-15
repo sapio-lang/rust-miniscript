@@ -670,7 +670,7 @@ impl<Pk: MiniscriptKey> ForEachKey<Pk> for Policy<Pk> {
             | Policy::Hash160(..)
             | Policy::After(..)
             | Policy::Older(..)
-            | Policy::TxTemplate(_) => true,
+            | Policy::TxTemplate(..) => true,
             Policy::Threshold(_, ref subs) | Policy::And(ref subs) => {
                 subs.iter().all(|sub| sub.for_each_key(&mut pred))
             }

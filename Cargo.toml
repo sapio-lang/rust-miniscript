@@ -17,7 +17,7 @@ rand = ["bitcoin/rand"]
 use-schemars = ["bitcoin/use-schemars", "schemars"]
 
 [dependencies]
-bitcoin = "0.26"
+bitcoin = "^0.26.0"
 
 [dependencies.schemars]
 version = "0.8.0"

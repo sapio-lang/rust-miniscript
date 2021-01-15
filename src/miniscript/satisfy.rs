@@ -155,7 +155,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for After {
 /// transaction template hash
 pub struct TxTemplate(sha256::Hash);
 
-impl<Pk: MiniscriptKey> Satisfier<Pk> for TxTemplate {
+impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for TxTemplate {
     fn check_tx_template(&self, h: sha256::Hash) -> bool {
         h == self.0
     }

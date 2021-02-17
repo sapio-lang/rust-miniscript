@@ -93,8 +93,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
             | Terminal::Hash160(..)
             | Terminal::TxTemplate(..)
             | Terminal::True
-            | Terminal::False
-            | Terminal::TxTemplate(..) => true,
+            | Terminal::False => true,
             Terminal::Alt(ref sub)
             | Terminal::Swap(ref sub)
             | Terminal::Check(ref sub)

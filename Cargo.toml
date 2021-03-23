@@ -1,13 +1,14 @@
 [package]
-name = "miniscript"
+name = "sapio-miniscript"
 version = "8.0.0"
 authors = [
-    "Andrew Poelstra <apoelstra@wpsoftware.net>, Sanket Kanjalkar <sanket1729@gmail.com>",
+    "Jeremy Rubin <jeremy.l.rubin@gmail.com>",
+    "Andrew Poelstra <apoelstra@wpsoftware.net>",
+    "Sanket Kanjalkar <sanket1729@gmail.com>",
 ]
+repository = "https://github.com/sapio-lang/rust-miniscript"
+description = "Miniscript: a subset of Bitcoin Script designed for analysis, Sapio extended edition (supports BIP-119 OP_CTV)"
 license = "CC0-1.0"
-homepage = "https://github.com/rust-bitcoin/rust-miniscript/"
-repository = "https://github.com/rust-bitcoin/rust-miniscript/"
-description = "Miniscript: a subset of Bitcoin Script designed for analysis"
 keywords = ["crypto", "bitcoin", "miniscript", "script"]
 readme = "README.md"
 edition = "2018"

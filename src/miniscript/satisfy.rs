@@ -969,7 +969,7 @@ impl Satisfaction {
                 } else {
                     Witness::Unavailable
                 },
-                has_sig: false,
+                has_sig: true,
             },
         }
     }

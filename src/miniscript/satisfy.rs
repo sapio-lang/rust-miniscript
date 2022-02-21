@@ -1415,8 +1415,8 @@ impl Satisfaction {
                 has_sig: false,
             },
             Terminal::TxTemplate(_) => Satisfaction {
-                stack: Witness::Unavailable,
-                has_sig: true,
+                stack: Witness::Impossible,
+                has_sig: false,
             },
         }
     }

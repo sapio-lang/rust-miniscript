@@ -934,7 +934,6 @@ pub enum SigHashError {
     MissingRedeemScript,
 }
 
-<<<<<<< HEAD
 impl fmt::Display for SigHashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -949,10 +948,6 @@ impl fmt::Display for SigHashError {
             }
             SigHashError::MissingWitnessScript => write!(f, "Missing Witness Script"),
             SigHashError::MissingRedeemScript => write!(f, "Missing Redeem Script"),
-=======
-        if let Some(witness) = input.final_script_witness.as_ref() {
-            ret.input[n].witness = witness.clone();
->>>>>>> a5a2e87 (Fix PSBT Code)
         }
     }
 }

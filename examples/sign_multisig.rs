@@ -27,7 +27,7 @@ fn main() {
 
     // Descriptor for the output being spent.
     let s = format!("wsh(multi(2,{},{},{}))", pks[0], pks[1], pks[2],);
-    let descriptor = miniscript::Descriptor::<bitcoin::PublicKey>::from_str(&s).unwrap();
+    let descriptor = sapio_miniscript::Descriptor::<bitcoin::PublicKey>::from_str(&s).unwrap();
 
     // Check weight for witness satisfaction cost ahead of time.
     // 4 (scriptSig length of 0) + 1 (witness stack size) + 106 (serialized witnessScript)
@@ -63,7 +63,7 @@ fn main() {
     // Attempt to satisfy at age 0, height 0.
     let original_txin = tx.input[0].clone();
 
-    let mut sigs = HashMap::<bitcoin::PublicKey, miniscript::bitcoin::EcdsaSig>::new();
+    let mut sigs = HashMap::<bitcoin::PublicKey, sapio_miniscript::bitcoin::EcdsaSig>::new();
 
     // Doesn't work with no signatures.
     assert!(descriptor.satisfy(&mut tx.input[0], &sigs).is_err());

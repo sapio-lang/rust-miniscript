@@ -17,6 +17,7 @@ use bitcoin::{self, Amount, LockTime, OutPoint, Sequence, Transaction, TxIn, TxO
 use bitcoind::bitcoincore_rpc::{json, Client, RpcApi};
 use miniscript::psbt::PsbtExt;
 use miniscript::Descriptor;
+use sapio_miniscript as miniscript;
 
 mod setup;
 use setup::test_util::{self, PubData, TestData};

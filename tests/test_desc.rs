@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::{error, fmt};
 
-use actual_rand as rand;
 use bitcoin::blockdata::witness::Witness;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
@@ -21,6 +20,7 @@ use bitcoin::{
 use bitcoind::bitcoincore_rpc::{json, Client, RpcApi};
 use miniscript::psbt::{PsbtExt, PsbtInputExt};
 use miniscript::{Descriptor, Miniscript, ScriptContext, ToPublicKey};
+use {actual_rand as rand, sapio_miniscript as miniscript};
 mod setup;
 
 use rand::RngCore;

@@ -20,7 +20,7 @@ use bitcoin::consensus::Decodable;
 use bitcoin::secp256k1::{self, Secp256k1};
 use bitcoin::util::sighash;
 use bitcoin::{LockTime, Sequence};
-use miniscript::interpreter::KeySigPair;
+use sapio_miniscript as miniscript;
 
 fn main() {
     //
@@ -30,7 +30,7 @@ fn main() {
     let tx = hard_coded_transaction();
     let spk_input_1 = hard_coded_script_pubkey();
 
-    let interpreter = miniscript::Interpreter::from_txdata(
+    let interpreter = sapio_miniscript::Interpreter::from_txdata(
         &spk_input_1,
         &tx.input[0].script_sig,
         &tx.input[0].witness,
@@ -101,13 +101,14 @@ fn main() {
     let secp = Secp256k1::new();
     let message = secp256k1::Message::from_slice(&[0x01; 32][..]).expect("32-byte hash");
 
-    let iter = interpreter.iter_custom(Box::new(|key_sig: &KeySigPair| {
-        let (pk, ecdsa_sig) = key_sig.as_ecdsa().expect("Ecdsa Sig");
-        ecdsa_sig.hash_ty == bitcoin::EcdsaSighashType::All
-            && secp
-                .verify_ecdsa(&message, &ecdsa_sig.sig, &pk.inner)
-                .is_ok()
-    }));
+    let iter =
+        interpreter.iter_custom(Box::new(|key_sig: &miniscript::interpreter::KeySigPair| {
+            let (pk, ecdsa_sig) = key_sig.as_ecdsa().expect("Ecdsa Sig");
+            ecdsa_sig.hash_ty == bitcoin::EcdsaSighashType::All
+                && secp
+                    .verify_ecdsa(&message, &ecdsa_sig.sig, &pk.inner)
+                    .is_ok()
+        }));
 
     println!("\n\nExample three:\n");
 

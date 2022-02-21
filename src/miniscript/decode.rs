@@ -457,7 +457,7 @@ pub fn parse<Ctx: ScriptContext>(
                             // `OP_ADD` or not and do the right thing
                         },
                     ),
-                    Tk::Drop, Tk::CheckTemplateVerify, Tk::Bytes32(h) => term.reduce0(Terminal::TxTemplate(sha256::Hash::from_slice(h).expect("valid_size")))?,
+                    Tk::Drop, Tk::CheckTemplateVerify, Tk::Bytes32(h) => term.reduce0(Terminal::TxTemplate(sha256::Hash::from_slice(h).expect("valid size")))?,
                     // most other fragments
                     Tk::Num(0) => term.reduce0(Terminal::False)?,
                     Tk::Num(1) => term.reduce0(Terminal::True)?,

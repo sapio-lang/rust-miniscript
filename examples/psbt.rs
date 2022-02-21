@@ -1,6 +1,6 @@
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::hex::FromHex;
-use miniscript::psbt::PsbtExt;
+use sapio_miniscript::psbt::PsbtExt;
 
 fn main() {
     // Test vectors from BIP 174

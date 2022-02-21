@@ -1,4 +1,4 @@
-extern crate miniscript;
+extern crate sapio_miniscript as miniscript;
 
 use bitcoind::bitcoincore_rpc::RpcApi;
 use bitcoind::BitcoinD;

@@ -402,6 +402,26 @@ impl<'txin> Stack<'txin> {
             Some(Err(Error::UnexpectedStackEnd))
         }
     }
+
+    /// Helper function to evaluate a txtemplate.
+    /// <h> CHECKTEMPLATEVERIFY
+    pub fn evaluate_txtemplate(
+        &mut self,
+        txtmplhash: &sha256::Hash,
+        expected: &sha256::Hash,
+    ) -> Option<Result<SatisfiedConstraint, Error>> {
+        Some(if txtmplhash == expected {
+            self.push(Element::Satisfied);
+            Ok(SatisfiedConstraint::TxTemplate {
+                hash: expected.clone(),
+            })
+        } else {
+            Err(Error::TxTemplateHashWrong(
+                txtmplhash.clone(),
+                expected.clone(),
+            ))
+        })
+    }
 }
 
 // Helper function to compute preimage from slice

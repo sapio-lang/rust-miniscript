@@ -50,6 +50,7 @@ pub struct Interpreter<'txin> {
     script_code: Option<bitcoin::Script>,
     age: Sequence,
     lock_time: LockTime,
+    txtemplate: sha256::Hash,
 }
 
 // A type representing functions for checking signatures that accept both
@@ -153,6 +154,7 @@ impl<'txin> Interpreter<'txin> {
         witness: &'txin Witness,
         age: Sequence,       // CSV, relative lock time.
         lock_time: LockTime, // CLTV, absolute lock time.
+        txtemplate: sha256::Hash,
     ) -> Result<Self, Error> {
         let (inner, stack, script_code) = inner::from_txdata(spk, script_sig, witness)?;
         Ok(Interpreter {
@@ -161,6 +163,7 @@ impl<'txin> Interpreter<'txin> {
             script_code,
             age,
             lock_time,
+            txtemplate,
         })
     }
 
@@ -194,6 +197,7 @@ impl<'txin> Interpreter<'txin> {
             lock_time: self.lock_time,
             has_errored: false,
             sig_type: self.sig_type(),
+            txtemplate: &self.txtemplate,
         }
     }
 
@@ -493,6 +497,11 @@ pub enum SatisfiedConstraint {
         /// The value of Absolute timelock
         n: LockTime,
     },
+    /// Check Template Verify Covenant
+    TxTemplate {
+        /// The hash value of the transaction
+        hash: sha256::Hash,
+    },
 }
 
 ///This is used by the interpreter to know which evaluation state a AstemElem is.
@@ -530,6 +539,7 @@ pub struct Iter<'intp, 'txin: 'intp> {
     lock_time: LockTime,
     has_errored: bool,
     sig_type: SigType,
+    txtemplate: &'intp sha256::Hash,
 }
 
 ///Iterator for Iter
@@ -977,6 +987,14 @@ where
                         }
                     }
                 }
+                Terminal::TxTemplate(expected) => {
+                    debug_assert_eq!(node_state.n_evaluated, 0);
+                    debug_assert_eq!(node_state.n_satisfied, 0);
+                    let res = self.stack.evaluate_txtemplate(&self.txtemplate, &expected);
+                    if res.is_some() {
+                        return res;
+                    }
+                }
                 //All other match patterns should not be reached in any valid
                 //type checked Miniscript
                 _ => return Some(Err(Error::CouldNotEvaluate)),
@@ -1136,6 +1154,7 @@ mod tests {
             verify_fn: Box<dyn FnMut(&KeySigPair) -> bool + 'elem>,
             stack: Stack<'txin>,
             ms: &'elem Miniscript<BitcoinKey, NoChecks>,
+            txtemplate: &'txin sha256::Hash,
         ) -> Iter<'elem, 'txin> {
             Iter {
                 verify_sig: verify_fn,
@@ -1150,6 +1169,7 @@ mod tests {
                 lock_time: LockTime::from_height(1002).unwrap(),
                 has_errored: false,
                 sig_type: SigType::Ecdsa,
+                txtemplate,
             }
         }
 
@@ -1171,7 +1191,7 @@ mod tests {
 
         let stack = Stack::from(vec![stack::Element::Push(&der_sigs[0])]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &pk);
+        let constraints = from_stack(Box::new(vfyfn), stack, &pk, &sha256_hash);
         let pk_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             pk_satisfied.unwrap(),
@@ -1183,7 +1203,7 @@ mod tests {
         //Check Pk failure with wrong signature
         let stack = Stack::from(vec![stack::Element::Dissatisfied]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &pk);
+        let constraints = from_stack(Box::new(vfyfn), stack, &pk, &sha256_hash);
         let pk_err: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(pk_err.is_err());
 
@@ -1194,7 +1214,7 @@ mod tests {
             stack::Element::Push(&pk_bytes),
         ]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &pkh);
+        let constraints = from_stack(Box::new(vfyfn), stack, &pkh, &sha256_hash);
         let pkh_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             pkh_satisfied.unwrap(),
@@ -1207,7 +1227,7 @@ mod tests {
         //Check After
         let stack = Stack::from(vec![]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &after);
+        let constraints = from_stack(Box::new(vfyfn), stack, &after, &sha256_hash);
         let after_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             after_satisfied.unwrap(),
@@ -1219,7 +1239,7 @@ mod tests {
         //Check Older
         let stack = Stack::from(vec![]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &older);
+        let constraints = from_stack(Box::new(vfyfn), stack, &older, &sha256_hash);
         let older_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             older_satisfied.unwrap(),
@@ -1231,7 +1251,7 @@ mod tests {
         //Check Sha256
         let stack = Stack::from(vec![stack::Element::Push(&preimage)]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &sha256);
+        let constraints = from_stack(Box::new(vfyfn), stack, &sha256, &sha256_hash);
         let sah256_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             sah256_satisfied.unwrap(),
@@ -1244,7 +1264,7 @@ mod tests {
         //Check Shad256
         let stack = Stack::from(vec![stack::Element::Push(&preimage)]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &hash256);
+        let constraints = from_stack(Box::new(vfyfn), stack, &hash256, &sha256_hash);
         let sha256d_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             sha256d_satisfied.unwrap(),
@@ -1257,7 +1277,7 @@ mod tests {
         //Check hash160
         let stack = Stack::from(vec![stack::Element::Push(&preimage)]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &hash160);
+        let constraints = from_stack(Box::new(vfyfn), stack, &hash160, &sha256_hash);
         let hash160_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             hash160_satisfied.unwrap(),
@@ -1270,7 +1290,7 @@ mod tests {
         //Check ripemd160
         let stack = Stack::from(vec![stack::Element::Push(&preimage)]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &ripemd160);
+        let constraints = from_stack(Box::new(vfyfn), stack, &ripemd160, &sha256_hash);
         let ripemd160_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
             ripemd160_satisfied.unwrap(),
@@ -1289,7 +1309,7 @@ mod tests {
         ]);
         let elem = no_checks_ms(&format!("and_v(vc:pk_k({}),c:pk_h({}))", pks[0], pks[1]));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let and_v_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1315,7 +1335,7 @@ mod tests {
             pks[0], sha256_hash
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let and_b_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1341,7 +1361,7 @@ mod tests {
             pks[0], sha256_hash, pks[1],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let and_or_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1365,7 +1385,7 @@ mod tests {
             stack::Element::Dissatisfied,
         ]);
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let and_or_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1386,7 +1406,7 @@ mod tests {
             pks[0], sha256_hash
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let or_b_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1404,7 +1424,7 @@ mod tests {
             pks[0], sha256_hash
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let or_d_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1424,7 +1444,7 @@ mod tests {
             sha256_hash, pks[0]
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let or_c_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1444,7 +1464,7 @@ mod tests {
             sha256_hash, pks[0]
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let or_i_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1467,7 +1487,7 @@ mod tests {
             pks[4], pks[3], pks[2], pks[1], pks[0],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let thresh_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1497,7 +1517,7 @@ mod tests {
             pks[4], pks[3], pks[2], pks[1], pks[0],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let multi_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1527,7 +1547,7 @@ mod tests {
             pks[4], pks[3], pks[2], pks[1], pks[0],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let multi_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_error.is_err());
@@ -1546,7 +1566,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let multi_a_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1578,7 +1598,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack.clone(), &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack.clone(), &elem, &sha256_hash);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());
@@ -1589,7 +1609,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack.clone(), &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack.clone(), &elem, &sha256_hash);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());
@@ -1600,7 +1620,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4], xpks[5]
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), stack, &elem, &sha256_hash);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());

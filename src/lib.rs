@@ -54,6 +54,7 @@
 //!
 //! ```rust
 //! use std::str::FromStr;
+//! use sapio_miniscript as miniscript;
 //!
 //! let desc = miniscript::Descriptor::<bitcoin::PublicKey>::from_str("\
 //!     sh(wsh(or_d(\
@@ -642,6 +643,8 @@ pub enum Error {
     RelativeLocktimeNotMet(u32),
     /// Could not satisfy, absolute locktime not met
     AbsoluteLocktimeNotMet(u32),
+    /// Could not satisfy, template hash verification not met
+    TxTemplateNotMet(sha256::Hash),
     /// General failure to satisfy
     CouldNotSatisfy,
     /// Typechecking failed
@@ -717,6 +720,9 @@ impl fmt::Display for Error {
                 "required absolute locktime CLTV of {} blocks, not met",
                 n
             ),
+            Error::TxTemplateNotMet(hash) => {
+                write!(f, "required template hash (CTV) of {}, not met", hash)
+            }
             Error::CouldNotSatisfy => f.write_str("could not satisfy"),
             Error::BadPubkey(ref e) => fmt::Display::fmt(e, f),
             Error::TypeCheck(ref e) => write!(f, "typecheck: {}", e),
@@ -783,6 +789,7 @@ impl error::Error for Error {
             | MissingSig(_)
             | RelativeLocktimeNotMet(_)
             | AbsoluteLocktimeNotMet(_)
+            | TxTemplateNotMet(_)
             | CouldNotSatisfy
             | TypeCheck(_)
             | BadDescriptor(_)

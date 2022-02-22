@@ -25,7 +25,8 @@ use core::ops::Deref;
 #[cfg(feature = "std")]
 use std::error;
 
-use bitcoin::hashes::{hash160, sha256d, Hash};
+use bitcoin::consensus::Encodable;
+use bitcoin::hashes::{hash160, sha256, sha256d, Hash};
 use bitcoin::secp256k1::{self, Secp256k1, VerifyOnly};
 use bitcoin::util::bip32;
 use bitcoin::util::psbt::{self, PartiallySignedTransaction as Psbt};
@@ -387,8 +388,48 @@ impl<'psbt, Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfie
             .get(&Pk::to_ripemd160(h))
             .and_then(try_vec_as_preimage32)
     }
+
+    fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        // do costly extract otherwise the scriptSigs are empty
+        get_ctv_hash(&self.psbt.clone().extract_tx(), self.index as u32) == h
+    }
 }
 
+fn get_ctv_hash(tx: &bitcoin::Transaction, input_index: u32) -> sha256::Hash {
+    let mut ctv_hash = sha256::Hash::engine();
+    tx.version.consensus_encode(&mut ctv_hash).unwrap();
+    tx.lock_time.consensus_encode(&mut ctv_hash).unwrap();
+    (tx.input.len() as u32)
+        .consensus_encode(&mut ctv_hash)
+        .unwrap();
+    {
+        let mut enc = sha256::Hash::engine();
+        for seq in tx.input.iter().map(|i| i.sequence) {
+            seq.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .into_inner()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
+
+    (tx.output.len() as u32)
+        .consensus_encode(&mut ctv_hash)
+        .unwrap();
+
+    {
+        let mut enc = sha256::Hash::engine();
+        for out in tx.output.iter() {
+            out.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .into_inner()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
+    input_index.consensus_encode(&mut ctv_hash).unwrap();
+    sha256::Hash::from_engine(ctv_hash)
+}
 fn try_vec_as_preimage32(vec: &Vec<u8>) -> Option<Preimage32> {
     if vec.len() == 32 {
         let mut arr = [0u8; 32];

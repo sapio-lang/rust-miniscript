@@ -396,6 +396,19 @@ impl<'txin> Stack<'txin> {
             Some(Err(Error::UnexpectedStackEnd))
         }
     }
+
+    /// Helper function to evaluate a txtemplate.
+    pub fn evaluate_txtemplate<'intp>(
+        &mut self,
+        given: &sha256::Hash,
+        expected: &'intp sha256::Hash,
+    ) -> Option<Result<SatisfiedConstraint, Error>> {
+        Some(if *given == *expected {
+            Ok(SatisfiedConstraint::TxTemplate { hash: *expected })
+        } else {
+            Err(Error::TxTemplateHashWrong)
+        })
+    }
 }
 
 // Helper function to compute preimage from slice

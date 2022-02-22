@@ -52,6 +52,7 @@ pub struct Interpreter<'txin> {
     script_code: Option<bitcoin::Script>,
     age: u32,
     height: u32,
+    txtemplate: sha256::Hash,
 }
 
 // A type representing functions for checking signatures that accept both
@@ -173,6 +174,7 @@ impl<'txin> Interpreter<'txin> {
         witness: &'txin Witness,
         age: u32,
         height: u32,
+        txtemplate: sha256::Hash,
     ) -> Result<Self, Error> {
         let (inner, stack, script_code) = inner::from_txdata(spk, script_sig, witness)?;
         Ok(Interpreter {
@@ -181,6 +183,7 @@ impl<'txin> Interpreter<'txin> {
             script_code,
             age,
             height,
+            txtemplate,
         })
     }
 
@@ -213,6 +216,7 @@ impl<'txin> Interpreter<'txin> {
             age: self.age,
             height: self.height,
             has_errored: false,
+            txtemplate: &self.txtemplate,
         }
     }
 
@@ -496,6 +500,11 @@ pub enum SatisfiedConstraint {
         /// The value of Absolute timelock
         time: u32,
     },
+    /// Check Template Verify Covenant
+    TxTemplate {
+        /// The hash value of the transaction
+        hash: sha256::Hash,
+    },
 }
 
 ///This is used by the interpreter to know which evaluation state a AstemElem is.
@@ -532,6 +541,7 @@ pub struct Iter<'intp, 'txin: 'intp> {
     age: u32,
     height: u32,
     has_errored: bool,
+    txtemplate: &'intp sha256::Hash,
 }
 
 ///Iterator for Iter
@@ -963,6 +973,14 @@ where
                             ),
                             x => return x, //forward errors as is
                         }
+                    }
+                }
+                Terminal::TxTemplate(ref h) => {
+                    debug_assert_eq!(node_state.n_evaluated, 0);
+                    debug_assert_eq!(node_state.n_satisfied, 0);
+                    let res = self.stack.evaluate_txtemplate(&h, &self.txtemplate);
+                    if res.is_some() {
+                        return res;
                     }
                 }
                 //All other match patterns should not be reached in any valid

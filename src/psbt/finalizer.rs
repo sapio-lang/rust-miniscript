@@ -20,13 +20,14 @@
 //!
 
 use bitcoin::blockdata::witness::Witness;
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{self, Secp256k1};
 use bitcoin::util::key::XOnlyPublicKey;
 use bitcoin::util::sighash::Prevouts;
 use bitcoin::util::taproot::LeafVersion;
 use bitcoin::{self, PublicKey, Script, TxOut};
 
-use super::{sanity_check, Error, InputError, Psbt, PsbtInputSatisfier};
+use super::{sanity_check, Error, InputError, PsbtInputSatisfier};
 use crate::prelude::*;
 use crate::util::witness_size;
 use crate::{
@@ -316,7 +317,7 @@ fn interpreter_inp_check<C: secp256k1::Verification, T: Borrow<TxOut>>(
             super::get_ctv_hash(&psbt.unsigned_tx, index as u32),
         )
         .map_err(|e| Error::InputError(InputError::Interpreter(e), index))?;
-        let iter = interpreter.iter(secp, &psbt.unsigned_tx, index, utxos);
+        let iter = interpreter.iter(secp, &psbt.unsigned_tx, index, &utxos);
         if let Some(error) = iter.filter_map(Result::err).next() {
             return Err(Error::InputError(InputError::Interpreter(error), index));
         };

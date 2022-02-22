@@ -27,12 +27,13 @@ use std::error;
 
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{hash160, sha256, sha256d, Hash};
-use bitcoin::secp256k1::{self, Secp256k1, VerifyOnly};
-use bitcoin::util::bip32;
-use bitcoin::util::psbt::{self, PartiallySignedTransaction as Psbt};
+use bitcoin::psbt::{self, Psbt};
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::util::sighash::SighashCache;
-use bitcoin::util::taproot::{self, ControlBlock, LeafVersion, TapLeafHash};
-use bitcoin::{self, EcdsaSighashType, LockTime, SchnorrSighashType, Script, Sequence};
+use bitcoin::util::taproot::{ControlBlock, LeafVersion, TapLeafHash};
+use bitcoin::util::{bip32, taproot};
+use bitcoin::{secp256k1, EcdsaSighashType, LockTime, SchnorrSighashType, Script, Sequence};
+use secp256k1::VerifyOnly;
 
 use crate::miniscript::context::SigType;
 use crate::prelude::*;

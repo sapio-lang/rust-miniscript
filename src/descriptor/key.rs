@@ -619,6 +619,7 @@ impl<K: InnerXKey> DescriptorXKey<K> {
     /// ```
     /// # use std::str::FromStr;
     /// # fn body() -> Result<(), ()> {
+    /// use sapio_miniscript as miniscript;
     /// use miniscript::bitcoin::util::bip32;
     /// use miniscript::descriptor::DescriptorPublicKey;
     ///

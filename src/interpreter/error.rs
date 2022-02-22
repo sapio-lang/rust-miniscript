@@ -16,8 +16,8 @@ use core::fmt;
 #[cfg(feature = "std")]
 use std::error;
 
-use bitcoin::hashes::hash160;
 use bitcoin::hashes::hex::ToHex;
+use bitcoin::hashes::{hash160, sha256};
 use bitcoin::util::taproot;
 use bitcoin::{self, secp256k1};
 
@@ -106,6 +106,10 @@ pub enum Error {
     SighashError(bitcoin::util::sighash::Error),
     /// Taproot Annex Unsupported
     TapAnnexUnsupported,
+    /// The txtemplate must be exactly 32 bytes.
+    TxTemplateHashLengthWrong,
+    /// The txtemplate must match the transaction
+    TxTemplateHashWrong(sha256::Hash, sha256::Hash),
     /// An uncompressed public key was encountered in a context where it is
     /// disallowed (e.g. in a Segwit script or p2wpkh output)
     UncompressedPubkey,
@@ -145,6 +149,14 @@ impl fmt::Display for Error {
             Error::ExpectedPush => f.write_str("expected push in script"),
             Error::CouldNotEvaluate => f.write_str("Interpreter Error: Could not evaluate"),
             Error::HashPreimageLengthMismatch => f.write_str("Hash preimage should be 32 bytes"),
+            Error::TxTemplateHashLengthWrong => f.write_str("Hash should be 32 bytes"),
+            Error::TxTemplateHashWrong(tx, stk) => {
+                write!(
+                    f,
+                    "Transaction template hash ({}) does not match the required hash ({})",
+                    tx, stk
+                )
+            }
             Error::IncorrectPubkeyHash => f.write_str("public key did not match scriptpubkey"),
             Error::IncorrectScriptHash => f.write_str("redeem script did not match scriptpubkey"),
             Error::IncorrectWPubkeyHash => {
@@ -229,8 +241,10 @@ impl error::Error for Error {
             | PkEvaluationError(_)
             | PkHashVerifyFail(_)
             | RelativeLocktimeNotMet(_)
+            | TxTemplateHashWrong(_, _)
             | ScriptSatisfactionError
             | TapAnnexUnsupported
+            | TxTemplateHashLengthWrong
             | UncompressedPubkey
             | UnexpectedStackBoolean
             | UnexpectedStackEnd

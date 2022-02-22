@@ -8,6 +8,7 @@
 /// This macro is handy when dealing with scripts that are only contain keys.
 /// See also [`crate::translate_hash_clone`]
 /// ```rust
+/// use sapio_miniscript as miniscript;
 /// use miniscript::{bitcoin::PublicKey, policy::concrete::Policy, Translator, hash256};
 /// use std::str::FromStr;
 /// use miniscript::translate_hash_fail;

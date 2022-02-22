@@ -402,6 +402,20 @@ impl<'txin> Stack<'txin> {
             Some(Err(Error::UnexpectedStackEnd))
         }
     }
+
+    /// Helper function to evaluate a txtemplate.
+    /// <h> CHECKTEMPLATEVERIFY
+    pub fn evaluate_txtemplate(
+        &mut self,
+        given: &sha256::Hash,
+        expected: &sha256::Hash,
+    ) -> Option<Result<SatisfiedConstraint, Error>> {
+        Some(if *given == *expected {
+            Ok(SatisfiedConstraint::TxTemplate { hash: *expected })
+        } else {
+            Err(Error::TxTemplateHashWrong(given.clone(), expected.clone()))
+        })
+    }
 }
 
 // Helper function to compute preimage from slice

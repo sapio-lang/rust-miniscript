@@ -36,6 +36,7 @@ fn main() {
         &tx.input[0].witness,
         Sequence::ZERO,
         LockTime::ZERO,
+        todo!(),
     )
     .unwrap();
 

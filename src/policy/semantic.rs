@@ -102,6 +102,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// # Example
     ///
     /// ```
+    /// use sapio_miniscript as miniscript;
     /// use miniscript::{bitcoin::{hashes::hash160, PublicKey}, policy::semantic::Policy, Translator};
     /// use miniscript::translate_hash_fail;
     /// use std::str::FromStr;

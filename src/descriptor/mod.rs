@@ -555,6 +555,7 @@ impl Descriptor<DescriptorPublicKey> {
     /// This is a shorthand for:
     ///
     /// ```
+    /// use sapio_miniscript as miniscript;
     /// # use miniscript::{Descriptor, DescriptorPublicKey, bitcoin::secp256k1::Secp256k1};
     /// # use core::str::FromStr;
     /// # let descriptor = Descriptor::<DescriptorPublicKey>::from_str("tr(xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ/0/*)")
@@ -733,6 +734,7 @@ impl Descriptor<DefiniteDescriptorKey> {
     /// # Examples
     ///
     /// ```
+    /// use sapio_miniscript as miniscript;
     /// use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
     /// use miniscript::bitcoin::secp256k1;
     /// use std::str::FromStr;

@@ -290,6 +290,10 @@ impl<'a, Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &'
     fn check_after(&self, n: LockTime) -> bool {
         (**self).check_after(n)
     }
+
+    fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        (**self).check_tx_template(h)
+    }
 }
 
 impl<'a, Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &'a mut S {
@@ -351,6 +355,10 @@ impl<'a, Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &'
 
     fn check_after(&self, n: LockTime) -> bool {
         (**self).check_after(n)
+    }
+
+    fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        (**self).check_tx_template(h)
     }
 }
 

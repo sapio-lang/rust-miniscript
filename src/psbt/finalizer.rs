@@ -20,13 +20,14 @@
 //!
 
 use bitcoin::blockdata::witness::Witness;
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{self, Secp256k1};
 use bitcoin::util::key::XOnlyPublicKey;
 use bitcoin::util::sighash::Prevouts;
 use bitcoin::util::taproot::LeafVersion;
 use bitcoin::{self, PublicKey, Script, TxOut};
 
-use super::{sanity_check, Error, InputError, Psbt, PsbtInputSatisfier};
+use super::{sanity_check, Error, InputError, PsbtInputSatisfier};
 use crate::prelude::*;
 use crate::util::witness_size;
 use crate::{

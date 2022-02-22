@@ -987,10 +987,10 @@ where
                         }
                     }
                 }
-                Terminal::TxTemplate(expected) => {
+                Terminal::TxTemplate(ref h) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);
                     debug_assert_eq!(node_state.n_satisfied, 0);
-                    let res = self.stack.evaluate_txtemplate(&self.txtemplate, &expected);
+                    let res = self.stack.evaluate_txtemplate(&h, &self.txtemplate);
                     if res.is_some() {
                         return res;
                     }

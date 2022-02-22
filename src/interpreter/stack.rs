@@ -407,19 +407,15 @@ impl<'txin> Stack<'txin> {
     /// <h> CHECKTEMPLATEVERIFY
     pub fn evaluate_txtemplate(
         &mut self,
-        txtmplhash: &sha256::Hash,
+        given: &sha256::Hash,
         expected: &sha256::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
-        Some(if txtmplhash == expected {
-            self.push(Element::Satisfied);
+        Some(if *given == *expected {
             Ok(SatisfiedConstraint::TxTemplate {
                 hash: expected.clone(),
             })
         } else {
-            Err(Error::TxTemplateHashWrong(
-                txtmplhash.clone(),
-                expected.clone(),
-            ))
+            Err(Error::TxTemplateHashWrong(given.clone(), expected.clone()))
         })
     }
 }

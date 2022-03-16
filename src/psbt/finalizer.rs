@@ -304,7 +304,7 @@ fn interpreter_inp_check<C: secp256k1::Verification>(
     psbt: &Psbt,
     secp: &Secp256k1<C>,
     index: usize,
-    utxos: &Prevouts,
+    utxos: &Prevouts<bitcoin::TxOut>,
     witness: &Witness,
     script_sig: &Script,
 ) -> Result<(), Error> {

@@ -411,9 +411,7 @@ impl<'txin> Stack<'txin> {
         expected: &sha256::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         Some(if *given == *expected {
-            Ok(SatisfiedConstraint::TxTemplate {
-                hash: expected.clone(),
-            })
+            Ok(SatisfiedConstraint::TxTemplate { hash: *expected })
         } else {
             Err(Error::TxTemplateHashWrong(given.clone(), expected.clone()))
         })

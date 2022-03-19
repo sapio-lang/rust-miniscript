@@ -389,6 +389,7 @@ impl<Pk: MiniscriptKey> Descriptor<Pk> {
     /// # Examples
     ///
     /// ```
+    /// # extern crate sapio_miniscript as miniscript;
     /// use std::str::FromStr;
     /// use miniscript::descriptor::Descriptor;
     /// use miniscript::{PreTaprootDescriptor, PreTaprootDescriptorTrait};
@@ -666,6 +667,7 @@ impl Descriptor<DescriptorPublicKey> {
     /// # Examples
     ///
     /// ```
+    /// # extern crate sapio_miniscript as miniscript;
     /// use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
     /// use miniscript::bitcoin::secp256k1;
     /// use std::str::FromStr;

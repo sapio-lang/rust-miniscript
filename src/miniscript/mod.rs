@@ -173,7 +173,7 @@ impl<Ctx: ScriptContext> Miniscript<Ctx::Key, Ctx> {
     ///
     /// ```rust
     /// extern crate bitcoin;
-    /// extern crate miniscript;
+    /// extern crate sapio_miniscript as miniscript;
     ///
     /// use miniscript::Miniscript;
     /// use miniscript::{Segwitv0, Tap};

@@ -15,6 +15,8 @@
 //! Example: Create an HTLC with miniscript using the policy compiler
 
 use std::str::FromStr;
+extern crate bitcoin;
+extern crate sapio_miniscript as miniscript;
 
 use bitcoin::Network;
 use miniscript::descriptor::Wsh;

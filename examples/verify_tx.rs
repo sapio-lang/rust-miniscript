@@ -15,9 +15,10 @@
 //! Example: Verifying a signed transaction
 
 extern crate bitcoin;
-extern crate miniscript;
+extern crate sapio_miniscript as miniscript;
 
 use bitcoin::consensus::Decodable;
+use bitcoin::hashes::Hash;
 use bitcoin::util::sighash;
 use bitcoin::{secp256k1, TxOut}; // secp256k1 re-exported from rust-bitcoin
 use miniscript::interpreter::KeySigPair;
@@ -91,6 +92,8 @@ fn main() {
         &transaction.input[0].witness,
         0,
         0,
+        // TODO: Replace with actual hash
+        bitcoin::hashes::sha256::Hash::from_inner([0u8; 32]),
     )
     .unwrap();
 
@@ -134,6 +137,7 @@ fn main() {
         &transaction.input[0].witness,
         0,
         0,
+        bitcoin::hashes::sha256::Hash::from_inner([0u8; 32]),
     )
     .unwrap();
 
@@ -162,6 +166,7 @@ fn main() {
         &transaction.input[0].witness,
         0,
         0,
+        bitcoin::hashes::sha256::Hash::from_inner([0u8; 32]),
     )
     .unwrap();
 

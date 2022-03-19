@@ -303,6 +303,12 @@ impl<Pk: MiniscriptKey> Descriptor<Pk> {
     /// bitcoin network under the current standardness and consensus rules. Also
     /// checks whether the descriptor requires signatures on all spend paths and
     /// whether the script is malleable.
+    /// ```
+    /// # extern crate sapio_miniscript as miniscript;
+    /// use std::str::FromStr;
+    /// use miniscript::descriptor::Descriptor;
+    /// use miniscript::{PreTaprootDescriptor, PreTaprootDescriptorTrait};
+    /// use miniscript::bitcoin;
     ///
     /// In general, all the guarantees of miniscript hold only for safe scripts.
     /// The signer may not be able to find satisfactions even if one exists.
@@ -559,6 +565,14 @@ impl Descriptor<DescriptorPublicKey> {
     /// # use miniscript::{Descriptor, DescriptorPublicKey, bitcoin::secp256k1::Secp256k1};
     /// # use core::str::FromStr;
     /// # let descriptor = Descriptor::<DescriptorPublicKey>::from_str("tr(xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ/0/*)")
+    /// # extern crate sapio_miniscript as miniscript;
+    /// use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
+    /// use miniscript::bitcoin::secp256k1;
+    /// use std::str::FromStr;
+    ///
+    /// // test from bip 86
+    /// let secp = secp256k1::Secp256k1::verification_only();
+    /// let descriptor = Descriptor::<DescriptorPublicKey>::from_str("tr(xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ/0/*)")
     ///     .expect("Valid ranged descriptor");
     /// # let index = 42;
     /// # let secp = Secp256k1::verification_only();

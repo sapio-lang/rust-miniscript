@@ -105,6 +105,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// use sapio_miniscript as miniscript;
     /// use miniscript::{bitcoin::{hashes::hash160, PublicKey}, policy::semantic::Policy, Translator};
     /// use miniscript::translate_hash_fail;
+    /// # extern crate sapio_miniscript as miniscript;
+    /// use miniscript::{bitcoin::{hashes::hash160, PublicKey}, policy::semantic::Policy};
     /// use std::str::FromStr;
     /// use std::collections::HashMap;
     /// let alice_pk = "02c79ef3ede6d14f72a00d0e49b4becfb152197b64c0707425c4f231df29500ee7";

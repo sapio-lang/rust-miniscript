@@ -1580,7 +1580,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), &txtmpl_hash, stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack, &elem);
 
         let multi_a_satisfied: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert_eq!(
@@ -1612,7 +1612,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), &txtmpl_hash, stack.clone(), &elem);
+        let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack.clone(), &elem);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());
@@ -1623,7 +1623,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), &txtmpl_hash, stack.clone(), &elem);
+        let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack.clone(), &elem);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());
@@ -1634,7 +1634,7 @@ mod tests {
             xpks[0], xpks[1], xpks[2], xpks[3], xpks[4], xpks[5]
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
-        let constraints = from_stack(Box::new(vfyfn), &txtmpl_hash, stack, &elem);
+        let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack, &elem);
 
         let multi_a_error: Result<Vec<SatisfiedConstraint>, Error> = constraints.collect();
         assert!(multi_a_error.is_err());

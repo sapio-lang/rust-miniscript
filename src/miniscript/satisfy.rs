@@ -547,8 +547,8 @@ impl Ord for Witness {
 
 impl Witness {
     /// Turn a signature into (part of) a satisfaction
-    fn signature<Pk: ToPublicKey, S: Satisfier<Pk>, Ctx: ScriptContext>(
-        sat: S,
+    fn signature<Pk: ToPublicKey, Ctx: ScriptContext>(
+        sat: &dyn Satisfier<Pk>,
         pk: &Pk,
         leaf_hash: &TapLeafHash,
     ) -> Self {
@@ -568,7 +568,7 @@ impl Witness {
     }
 
     /// Turn a public key related to a pkh into (part of) a satisfaction
-    fn pkh_public_key<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, pkh: &Pk::Hash) -> Self {
+    fn pkh_public_key<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, pkh: &Pk::Hash) -> Self {
         match sat.lookup_pkh_pk(pkh) {
             Some(pk) => Witness::Stack(vec![pk.to_public_key().to_bytes()]),
             // public key hashes are assumed to be unavailable
@@ -578,7 +578,7 @@ impl Witness {
     }
 
     /// Turn a key/signature pair related to a pkh into (part of) a satisfaction
-    fn pkh_signature<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, pkh: &Pk::Hash) -> Self {
+    fn pkh_signature<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, pkh: &Pk::Hash) -> Self {
         match sat.lookup_pkh_ecdsa_sig(pkh) {
             Some((pk, sig)) => Witness::Stack(vec![sig.to_vec(), pk.to_public_key().to_bytes()]),
             None => Witness::Impossible,
@@ -586,7 +586,7 @@ impl Witness {
     }
 
     /// Turn a hash preimage into (part of) a satisfaction
-    fn ripemd160_preimage<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, h: ripemd160::Hash) -> Self {
+    fn ripemd160_preimage<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, h: ripemd160::Hash) -> Self {
         match sat.lookup_ripemd160(h) {
             Some(pre) => Witness::Stack(vec![pre.to_vec()]),
             // Note hash preimages are unavailable instead of impossible
@@ -595,7 +595,7 @@ impl Witness {
     }
 
     /// Turn a hash preimage into (part of) a satisfaction
-    fn hash160_preimage<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, h: hash160::Hash) -> Self {
+    fn hash160_preimage<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, h: hash160::Hash) -> Self {
         match sat.lookup_hash160(h) {
             Some(pre) => Witness::Stack(vec![pre.to_vec()]),
             // Note hash preimages are unavailable instead of impossible
@@ -604,7 +604,7 @@ impl Witness {
     }
 
     /// Turn a hash preimage into (part of) a satisfaction
-    fn sha256_preimage<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, h: sha256::Hash) -> Self {
+    fn sha256_preimage<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, h: sha256::Hash) -> Self {
         match sat.lookup_sha256(h) {
             Some(pre) => Witness::Stack(vec![pre.to_vec()]),
             // Note hash preimages are unavailable instead of impossible
@@ -613,7 +613,7 @@ impl Witness {
     }
 
     /// Turn a hash preimage into (part of) a satisfaction
-    fn hash256_preimage<Pk: ToPublicKey, S: Satisfier<Pk>>(sat: S, h: sha256d::Hash) -> Self {
+    fn hash256_preimage<Pk: ToPublicKey>(sat: &dyn Satisfier<Pk>, h: sha256d::Hash) -> Self {
         match sat.lookup_hash256(h) {
             Some(pre) => Witness::Stack(vec![pre.to_vec()]),
             // Note hash preimages are unavailable instead of impossible
@@ -668,10 +668,10 @@ pub struct Satisfaction {
 
 impl Satisfaction {
     // produce a non-malleable satisafaction for thesh frag
-    fn thresh<Pk, Ctx, Sat, F>(
+    fn thresh<Pk, Ctx, F>(
         k: usize,
         subs: &[Arc<Miniscript<Pk, Ctx>>],
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
         min_fn: &mut F,
@@ -679,7 +679,6 @@ impl Satisfaction {
     where
         Pk: MiniscriptKey + ToPublicKey,
         Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
         F: FnMut(Satisfaction, Satisfaction) -> Satisfaction,
     {
         let mut sats = subs
@@ -786,10 +785,10 @@ impl Satisfaction {
     }
 
     // produce a possily malleable satisafaction for thesh frag
-    fn thresh_mall<Pk, Ctx, Sat, F>(
+    fn thresh_mall<Pk, Ctx, F>(
         k: usize,
         subs: &[Arc<Miniscript<Pk, Ctx>>],
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
         min_fn: &mut F,
@@ -797,7 +796,6 @@ impl Satisfaction {
     where
         Pk: MiniscriptKey + ToPublicKey,
         Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
         F: FnMut(Satisfaction, Satisfaction) -> Satisfaction,
     {
         let mut sats = subs
@@ -915,9 +913,9 @@ impl Satisfaction {
     }
 
     // produce a non-malleable satisfaction
-    fn satisfy_helper<Pk, Ctx, Sat, F, G>(
+    fn satisfy_helper<Pk, Ctx, F, G>(
         term: &Terminal<Pk, Ctx>,
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
         min_fn: &mut F,
@@ -926,12 +924,11 @@ impl Satisfaction {
     where
         Pk: MiniscriptKey + ToPublicKey,
         Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
         F: FnMut(Satisfaction, Satisfaction) -> Satisfaction,
         G: FnMut(
             usize,
             &[Arc<Miniscript<Pk, Ctx>>],
-            &Sat,
+            &dyn Satisfier<Pk>,
             bool,
             &TapLeafHash,
             &mut F,
@@ -939,7 +936,7 @@ impl Satisfaction {
     {
         match *term {
             Terminal::PkK(ref pk) => Satisfaction {
-                stack: Witness::signature::<_, _, Ctx>(stfr, pk, leaf_hash),
+                stack: Witness::signature::<_, Ctx>(stfr, pk, leaf_hash),
                 has_sig: true,
             },
             Terminal::PkH(ref pkh) => Satisfaction {
@@ -1144,7 +1141,7 @@ impl Satisfaction {
                 let mut sig_count = 0;
                 let mut sigs = Vec::with_capacity(k);
                 for pk in keys {
-                    match Witness::signature::<_, _, Ctx>(stfr, pk, leaf_hash) {
+                    match Witness::signature::<_, Ctx>(stfr, pk, leaf_hash) {
                         Witness::Stack(sig) => {
                             sigs.push(sig);
                             sig_count += 1;
@@ -1186,7 +1183,7 @@ impl Satisfaction {
                 let mut sig_count = 0;
                 let mut sigs = vec![vec![vec![]]; keys.len()];
                 for (i, pk) in keys.iter().rev().enumerate() {
-                    match Witness::signature::<_, _, Ctx>(stfr, pk, leaf_hash) {
+                    match Witness::signature::<_, Ctx>(stfr, pk, leaf_hash) {
                         Witness::Stack(sig) => {
                             sigs[i] = sig;
                             sig_count += 1;
@@ -1223,9 +1220,9 @@ impl Satisfaction {
     }
 
     // Helper function to produce a dissatisfaction
-    fn dissatisfy_helper<Pk, Ctx, Sat, F, G>(
+    fn dissatisfy_helper<Pk, Ctx, F, G>(
         term: &Terminal<Pk, Ctx>,
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
         min_fn: &mut F,
@@ -1234,12 +1231,11 @@ impl Satisfaction {
     where
         Pk: MiniscriptKey + ToPublicKey,
         Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
         F: FnMut(Satisfaction, Satisfaction) -> Satisfaction,
         G: FnMut(
             usize,
             &[Arc<Miniscript<Pk, Ctx>>],
-            &Sat,
+            &dyn Satisfier<Pk>,
             bool,
             &TapLeafHash,
             &mut F,
@@ -1393,13 +1389,9 @@ impl Satisfaction {
     }
 
     /// Produce a satisfaction non-malleable satisfaction
-    pub(super) fn satisfy<
-        Pk: MiniscriptKey + ToPublicKey,
-        Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
-    >(
+    pub(super) fn satisfy<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext>(
         term: &Terminal<Pk, Ctx>,
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
     ) -> Self {
@@ -1414,13 +1406,9 @@ impl Satisfaction {
     }
 
     /// Produce a satisfaction(possibly malleable)
-    pub(super) fn satisfy_mall<
-        Pk: MiniscriptKey + ToPublicKey,
-        Ctx: ScriptContext,
-        Sat: Satisfier<Pk>,
-    >(
+    pub(super) fn satisfy_mall<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext>(
         term: &Terminal<Pk, Ctx>,
-        stfr: &Sat,
+        stfr: &dyn Satisfier<Pk>,
         root_has_sig: bool,
         leaf_hash: &TapLeafHash,
     ) -> Self {

@@ -112,10 +112,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for PreTaprootDescriptor<Pk> {
     /// Returns satisfying non-malleable witness and scriptSig to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         match *self {
             PreTaprootDescriptor::Bare(ref bare) => bare.get_satisfaction(satisfier),
@@ -129,10 +131,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for PreTaprootDescriptor<Pk> {
     /// Returns a possilbly mallable satisfying non-malleable witness and scriptSig to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         match *self {
             PreTaprootDescriptor::Bare(ref bare) => bare.get_satisfaction_mall(satisfier),

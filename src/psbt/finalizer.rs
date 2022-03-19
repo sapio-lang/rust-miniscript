@@ -391,9 +391,9 @@ fn finalize_input_helper<C: secp256k1::Verification>(
             //generate the satisfaction witness and scriptsig
             let sat = PsbtInputSatisfier::new(&psbt, index);
             if !allow_mall {
-                desc.get_satisfaction(sat)
+                desc.get_satisfaction(&sat)
             } else {
-                desc.get_satisfaction_mall(sat)
+                desc.get_satisfaction_mall(&sat)
             }
             .map_err(|e| Error::InputError(InputError::MiniscriptError(e), index))?
         }

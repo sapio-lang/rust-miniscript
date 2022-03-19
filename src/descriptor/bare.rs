@@ -167,10 +167,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Bare<Pk> {
         Ok(self.inner_script())
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let ms = self.ms.satisfy(satisfier)?;
         let script_sig = witness_to_scriptsig(&ms);
@@ -178,10 +180,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Bare<Pk> {
         Ok((witness, script_sig))
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let ms = self.ms.satisfy_malleable(satisfier)?;
         let script_sig = witness_to_scriptsig(&ms);
@@ -376,10 +380,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Pkh<Pk> {
         Ok(self.inner_script())
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         if let Some(sig) = satisfier.lookup_ecdsa_sig(&self.pk) {
             let sig_vec = sig.to_vec();
@@ -394,10 +400,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Pkh<Pk> {
         }
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         self.get_satisfaction(satisfier)
     }

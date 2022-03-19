@@ -356,13 +356,13 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Attempt to produce non-malleable satisfying witness for the
     /// witness script represented by the parse tree
-    pub fn satisfy<S: satisfy::Satisfier<Pk>>(&self, satisfier: S) -> Result<Vec<Vec<u8>>, Error>
+    pub fn satisfy(&self, satisfier: &dyn satisfy::Satisfier<Pk>) -> Result<Vec<Vec<u8>>, Error>
     where
         Pk: ToPublicKey,
     {
         // Only satisfactions for default versions (0xc0) are allowed.
         let leaf_hash = TapLeafHash::from_script(&self.encode(), LeafVersion::TapScript);
-        match satisfy::Satisfaction::satisfy(&self.node, &satisfier, self.ty.mall.safe, &leaf_hash)
+        match satisfy::Satisfaction::satisfy(&self.node, satisfier, self.ty.mall.safe, &leaf_hash)
             .stack
         {
             satisfy::Witness::Stack(stack) => {
@@ -377,9 +377,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
 
     /// Attempt to produce a malleable satisfying witness for the
     /// witness script represented by the parse tree
-    pub fn satisfy_malleable<S: satisfy::Satisfier<Pk>>(
+    pub fn satisfy_malleable(
         &self,
-        satisfier: S,
+        satisfier: &dyn satisfy::Satisfier<Pk>,
     ) -> Result<Vec<Vec<u8>>, Error>
     where
         Pk: ToPublicKey,
@@ -387,7 +387,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
         let leaf_hash = TapLeafHash::from_script(&self.encode(), LeafVersion::TapScript);
         match satisfy::Satisfaction::satisfy_mall(
             &self.node,
-            &satisfier,
+            satisfier,
             self.ty.mall.safe,
             &leaf_hash,
         )
@@ -1069,7 +1069,7 @@ mod tests {
         let schnorr_sig = secp256k1::schnorr::Signature::from_str("84526253c27c7aef56c7b71a5cd25bebb66dddda437826defc5b2568bde81f0784526253c27c7aef56c7b71a5cd25bebb66dddda437826defc5b2568bde81f07").unwrap();
         let s = SimpleSatisfier(schnorr_sig);
 
-        let wit = tap_ms.satisfy(s).unwrap();
+        let wit = tap_ms.satisfy(&s).unwrap();
         assert_eq!(wit, vec![schnorr_sig.as_ref().to_vec(), vec![], vec![]]);
     }
 

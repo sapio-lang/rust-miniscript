@@ -1382,14 +1382,14 @@ mod tests {
             right_sat.insert(keys[i].to_pubkeyhash(), (keys[i], bitcoinsig));
         }
 
-        assert!(ms.satisfy(no_sat).is_err());
+        assert!(ms.satisfy(&no_sat).is_err());
         assert!(ms.satisfy(&left_sat).is_ok());
-        assert!(ms.satisfy((&right_sat, satisfy::Older(10001))).is_ok());
+        assert!(ms.satisfy(&(&right_sat, satisfy::Older(10001))).is_ok());
         //timelock not met
-        assert!(ms.satisfy((&right_sat, satisfy::Older(9999))).is_err());
+        assert!(ms.satisfy(&(&right_sat, satisfy::Older(9999))).is_err());
 
         assert_eq!(
-            ms.satisfy((left_sat, satisfy::Older(9999))).unwrap(),
+            ms.satisfy(&(left_sat, satisfy::Older(9999))).unwrap(),
             vec![
                 // sat for left branch
                 vec![],
@@ -1400,7 +1400,7 @@ mod tests {
         );
 
         assert_eq!(
-            ms.satisfy((right_sat, satisfy::Older(10000))).unwrap(),
+            ms.satisfy(&(right_sat, satisfy::Older(10000))).unwrap(),
             vec![
                 // sat for right branch
                 vec![],

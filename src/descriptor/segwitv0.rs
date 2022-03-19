@@ -227,10 +227,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Wsh<Pk> {
         Ok(self.inner_script())
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let mut witness = match self.inner {
             WshInner::SortedMulti(ref smv) => smv.satisfy(satisfier)?,
@@ -242,10 +244,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Wsh<Pk> {
         Ok((witness, script_sig))
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let mut witness = match self.inner {
             WshInner::SortedMulti(ref smv) => smv.satisfy(satisfier)?,
@@ -489,10 +493,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Wpkh<Pk> {
         Ok(self.inner_script())
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         if let Some(sig) = satisfier.lookup_ecdsa_sig(&self.pk) {
             let sig_vec = sig.to_vec();
@@ -504,10 +510,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Wpkh<Pk> {
         }
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         self.get_satisfaction(satisfier)
     }

@@ -323,10 +323,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Sh<Pk> {
         Ok(self.inner_script())
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let script_sig = self.unsigned_script_sig();
         match self.inner {
@@ -355,10 +357,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Sh<Pk> {
         }
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let script_sig = self.unsigned_script_sig();
         match self.inner {

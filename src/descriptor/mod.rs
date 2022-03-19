@@ -127,26 +127,29 @@ pub trait DescriptorTrait<Pk: MiniscriptKey> {
     /// Returns satisfying non-malleable witness and scriptSig with minimum weight to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
-        Pk: ToPublicKey,
-        S: Satisfier<Pk>;
+        Pk: ToPublicKey;
 
     /// Returns satisfying, possibly malleable witness and scriptSig to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
-        Pk: ToPublicKey,
-        S: Satisfier<Pk>;
+        Pk: ToPublicKey;
 
     /// Attempts to produce a non-malleable satisfying witness and scriptSig to spend an
     /// output controlled by the given descriptor; add the data to a given
     /// `TxIn` output.
-    fn satisfy<S>(&self, txin: &mut bitcoin::TxIn, satisfier: S) -> Result<(), Error>
+    fn satisfy(&self, txin: &mut bitcoin::TxIn, satisfier: &dyn Satisfier<Pk>) -> Result<(), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         // easy default implementation
         let (witness, script_sig) = self.get_satisfaction(satisfier)?;
@@ -514,10 +517,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Descriptor<Pk> {
     /// Returns satisfying non-malleable witness and scriptSig to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         match *self {
             Descriptor::Bare(ref bare) => bare.get_satisfaction(satisfier),
@@ -532,10 +537,12 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Descriptor<Pk> {
     /// Returns a possilbly mallable satisfying non-malleable witness and scriptSig to spend an
     /// output controlled by the given descriptor if it possible to
     /// construct one using the satisfier S.
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         match *self {
             Descriptor::Bare(ref bare) => bare.get_satisfaction_mall(satisfier),

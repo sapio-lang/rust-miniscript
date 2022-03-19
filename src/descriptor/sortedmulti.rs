@@ -160,10 +160,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> SortedMultiVec<Pk, Ctx> {
 
     /// Attempt to produce a satisfying witness for the
     /// witness script represented by the parse tree
-    pub fn satisfy<S>(&self, satisfier: S) -> Result<Vec<Vec<u8>>, Error>
+    pub fn satisfy(&self, satisfier: &dyn Satisfier<Pk>) -> Result<Vec<Vec<u8>>, Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         let ms = Miniscript::from_ast(self.sorted_node()).expect("Multi node typecheck");
         ms.satisfy(satisfier)

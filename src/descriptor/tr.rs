@@ -594,18 +594,22 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Tr<Pk> {
         Err(Error::TrNoScriptCode)
     }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         best_tap_spend(&self, satisfier, false /* allow_mall */)
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    fn get_satisfaction_mall(
+        &self,
+        satisfier: &dyn Satisfier<Pk>,
+    ) -> Result<(Vec<Vec<u8>>, Script), Error>
     where
         Pk: ToPublicKey,
-        S: Satisfier<Pk>,
     {
         best_tap_spend(&self, satisfier, true /* allow_mall */)
     }
@@ -687,14 +691,13 @@ fn control_block_len(depth: usize) -> usize {
 
 // Helper function to get a script spend satisfaction
 // try script spend
-fn best_tap_spend<Pk, S>(
+fn best_tap_spend<Pk>(
     desc: &Tr<Pk>,
-    satisfier: S,
+    satisfier: &dyn Satisfier<Pk>,
     allow_mall: bool,
 ) -> Result<(Vec<Vec<u8>>, Script), Error>
 where
     Pk: ToPublicKey,
-    S: Satisfier<Pk>,
 {
     let spend_info = desc.spend_info();
     // First try the key spend path
@@ -706,12 +709,12 @@ where
         let (mut min_wit, mut min_wit_len) = (None, None);
         for (depth, ms) in desc.iter_scripts() {
             let mut wit = if allow_mall {
-                match ms.satisfy_malleable(&satisfier) {
+                match ms.satisfy_malleable(satisfier) {
                     Ok(wit) => wit,
                     Err(..) => continue, // No witness for this script in tr descriptor, look for next one
                 }
             } else {
-                match ms.satisfy(&satisfier) {
+                match ms.satisfy(satisfier) {
                     Ok(wit) => wit,
                     Err(..) => continue, // No witness for this script in tr descriptor, look for next one
                 }

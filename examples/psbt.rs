@@ -1,5 +1,5 @@
 extern crate bitcoin;
-extern crate miniscript;
+extern crate sapio_miniscript as miniscript;
 
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::hex::FromHex;

@@ -20,6 +20,7 @@ use bitcoin::consensus::Decodable;
 use bitcoin::secp256k1::{self, Secp256k1};
 use bitcoin::util::sighash;
 use bitcoin::{LockTime, Sequence};
+use miniscript::psbt;
 use sapio_miniscript as miniscript;
 
 fn main() {
@@ -36,7 +37,7 @@ fn main() {
         &tx.input[0].witness,
         Sequence::ZERO,
         LockTime::ZERO,
-        todo!(),
+        psbt::get_ctv_hash(&tx, 0),
     )
     .unwrap();
 

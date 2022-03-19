@@ -396,7 +396,8 @@ impl<'psbt, Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfie
     }
 }
 
-pub(crate) fn get_ctv_hash(tx: &bitcoin::Transaction, input_index: u32) -> sha256::Hash {
+/// computes the template hash of a Bitcoin Transaction at the given input index.
+pub fn get_ctv_hash(tx: &bitcoin::Transaction, input_index: u32) -> sha256::Hash {
     let mut ctv_hash = sha256::Hash::engine();
     tx.version.consensus_encode(&mut ctv_hash).unwrap();
     tx.lock_time.consensus_encode(&mut ctv_hash).unwrap();

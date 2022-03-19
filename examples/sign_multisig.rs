@@ -14,11 +14,15 @@
 
 //! Example: Signing a 2-of-3 multisignature.
 
+extern crate bitcoin;
+extern crate sapio_miniscript as miniscript;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 
 use bitcoin::blockdata::witness::Witness;
-use bitcoin::{secp256k1, PackedLockTime, Sequence};
+use bitcoin::secp256k1; // secp256k1 re-exported from rust-bitcoin
+use bitcoin::{PackedLockTime, Sequence};
 
 fn main() {
     let mut tx = spending_transaction();

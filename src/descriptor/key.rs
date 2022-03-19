@@ -617,6 +617,7 @@ impl<K: InnerXKey> DescriptorXKey<K> {
     /// ## Examples
     ///
     /// ```
+    /// # extern crate sapio_miniscript as miniscript;
     /// # use std::str::FromStr;
     /// # fn body() -> Result<(), ()> {
     /// use sapio_miniscript as miniscript;

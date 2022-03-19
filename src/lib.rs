@@ -53,6 +53,9 @@
 //! ## Deriving an address from a descriptor
 //!
 //! ```rust
+//! extern crate bitcoin;
+//! extern crate sapio_miniscript as miniscript;
+//!
 //! use std::str::FromStr;
 //! use sapio_miniscript as miniscript;
 //!

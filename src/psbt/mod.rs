@@ -255,6 +255,7 @@ impl<'psbt> PsbtInputSatisfier<'psbt> {
 
 impl<'psbt, Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfier<'psbt> {
     fn lookup_tap_key_spend_sig(&self) -> Option<bitcoin::SchnorrSig> {
+        println!("Looking up Key Sig");
         self.psbt.inputs[self.index].tap_key_sig
     }
 
@@ -360,6 +361,7 @@ impl<'psbt, Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfie
     }
 
     fn check_tx_template(&self, h: sha256::Hash) -> bool {
+        println!("Using Correct CTV Satisfier");
         // do costly extract otherwise the scriptSigs are empty
         get_ctv_hash(&self.psbt.clone().extract_tx(), self.index as u32) == h
     }

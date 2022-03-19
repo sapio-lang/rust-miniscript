@@ -18,6 +18,7 @@
 //! scriptpubkeys.
 //!
 
+use bitcoin::hashes::Hash;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::{cmp, i64, mem};
@@ -124,6 +125,7 @@ pub trait Satisfier<Pk: MiniscriptKey + ToPublicKey> {
 
     /// Assert if tx template is satisfied
     fn check_tx_template(&self, _: sha256::Hash) -> bool {
+        println!("ERROR: Using Default CTV Satisfier");
         false
     }
 }
@@ -952,6 +954,11 @@ impl Satisfaction {
             &mut F,
         ) -> Satisfaction,
     {
+        println!("Evaluating: {:?}", term);
+        println!(
+            "Got: {:?}",
+            stfr.check_tx_template(sha256::Hash::from_inner([0u8; 32]))
+        );
         match *term {
             Terminal::PkK(ref pk) => Satisfaction {
                 stack: Witness::signature::<_, _, Ctx>(stfr, pk, leaf_hash),
@@ -1234,14 +1241,17 @@ impl Satisfaction {
                     }
                 }
             }
-            Terminal::TxTemplate(h) => Satisfaction {
-                stack: if stfr.check_tx_template(h) {
-                    Witness::empty()
-                } else {
-                    Witness::Unavailable
-                },
-                has_sig: true,
-            },
+            Terminal::TxTemplate(h) => {
+                println!("Trying Satisfying: {}", h);
+                Satisfaction {
+                    stack: if stfr.check_tx_template(h) {
+                        Witness::empty()
+                    } else {
+                        Witness::Unavailable
+                    },
+                    has_sig: true,
+                }
+            }
         }
     }
 

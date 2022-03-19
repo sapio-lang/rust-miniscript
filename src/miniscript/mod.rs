@@ -24,6 +24,8 @@
 //! components of the AST.
 //!
 
+use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
 use std::marker::PhantomData;
 use std::{fmt, str};
 
@@ -384,6 +386,10 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     where
         Pk: ToPublicKey,
     {
+        println!(
+            "satisfy_malleable: Checking Manually {}",
+            satisfier.check_tx_template(sha256::Hash::from_inner([1u8; 32]))
+        );
         let leaf_hash = TapLeafHash::from_script(&self.encode(), LeafVersion::TapScript);
         match satisfy::Satisfaction::satisfy_mall(
             &self.node,

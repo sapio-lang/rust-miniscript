@@ -67,6 +67,13 @@ fn construct_tap_witness(
                 Ok(ms) => ms,
                 Err(..) => continue, // try another script
             };
+            println!("Parsed");
+            println!("Satifying mall ={}", allow_mall);
+            let h = super::get_ctv_hash(&sat.psbt.clone().extract_tx(), sat.index as u32);
+            println!(
+                "Checking Manually {}",
+                <PsbtInputSatisfier as Satisfier<XOnlyPublicKey>>::check_tx_template(sat, h)
+            );
             let mut wit = if allow_mall {
                 match ms.satisfy_malleable(sat) {
                     Ok(ms) => ms,
@@ -78,10 +85,12 @@ fn construct_tap_witness(
                     Err(..) => continue,
                 }
             };
+            println!("Have Wit");
             wit.push(ms.encode().into_bytes());
             wit.push(control_block.serialize());
             let wit_len = Some(witness_size(&wit));
             if min_wit_len.is_some() && wit_len > min_wit_len {
+                println!("Have Better Wit");
                 continue;
             } else {
                 // store the minimum
@@ -89,8 +98,10 @@ fn construct_tap_witness(
                 min_wit_len = wit_len;
             }
         }
+        println!("Have Answer: {}", min_wit.is_some());
         min_wit.ok_or(InputError::CouldNotSatisfyTr)
     } else {
+        println!("No Control");
         // No control blocks found
         Err(InputError::CouldNotSatisfyTr)
     }

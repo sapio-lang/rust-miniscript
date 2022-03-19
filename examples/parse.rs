@@ -14,10 +14,13 @@
 
 //! Example: Parsing a descriptor from a string.
 
+extern crate bitcoin;
+extern crate sapio_miniscript as miniscript;
+
 use std::str::FromStr;
 
-use sapio_miniscript::descriptor::DescriptorType;
-use sapio_miniscript::Descriptor;
+use miniscript::descriptor::DescriptorType;
+use miniscript::Descriptor;
 
 fn main() {
     let desc = sapio_miniscript::Descriptor::<bitcoin::PublicKey>::from_str(

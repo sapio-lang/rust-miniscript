@@ -14,7 +14,7 @@
 
 //! Example: Parsing a xpub and getting address
 
-extern crate miniscript;
+extern crate sapio_miniscript as miniscript;
 
 use miniscript::bitcoin::{self, secp256k1};
 use miniscript::{Descriptor, DescriptorPublicKey, DescriptorTrait, TranslatePk2};

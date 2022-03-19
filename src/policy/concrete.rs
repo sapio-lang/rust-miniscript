@@ -173,6 +173,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// # Example
     ///
     /// ```
+    /// # extern crate sapio_miniscript as miniscript;
     /// use miniscript::{bitcoin::PublicKey, policy::concrete::Policy};
     /// use std::str::FromStr;
     /// let alice_key = "0270cf3c71f65a3d93d285d9149fddeeb638f87a2d4d8cf16c525f71c417439777";

@@ -54,7 +54,7 @@
 //!
 //! ```rust
 //! extern crate bitcoin;
-//! extern crate miniscript;
+//! extern crate sapio_miniscript as miniscript;
 //!
 //! use std::str::FromStr;
 //! use miniscript::{DescriptorTrait};

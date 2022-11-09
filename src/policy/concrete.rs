@@ -128,6 +128,8 @@ enum PolicyArc<Pk: MiniscriptKey> {
     Or(Vec<(usize, Arc<PolicyArc<Pk>>)>),
     /// A set of descriptors' references, satisfactions must be provided for `k` of them
     Threshold(usize, Vec<Arc<PolicyArc<Pk>>>),
+    /// A SHA256 whose must match the tx template
+    TxTemplate(sha256::Hash),
 }
 
 #[cfg(feature = "compiler")]
@@ -159,6 +161,7 @@ impl<Pk: MiniscriptKey> From<PolicyArc<Pk>> for Policy<Pk> {
                     .map(|pol| Self::from((*pol).clone()))
                     .collect(),
             ),
+            PolicyArc::TxTemplate(h) => Policy::TxTemplate(h),
         }
     }
 }
@@ -192,6 +195,7 @@ impl<Pk: MiniscriptKey> From<Policy<Pk>> for PolicyArc<Pk> {
                     .map(|sub| Arc::new(Self::from(sub.clone())))
                     .collect(),
             ),
+            Policy::TxTemplate(h) => PolicyArc::TxTemplate(h),
         }
     }
 }

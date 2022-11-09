@@ -200,11 +200,6 @@ impl<Ctx: ScriptContext> Miniscript<Ctx::Key, Ctx> {
     /// use std::vec::Vec;
     /// use sapio_miniscript as miniscript;
     /// use miniscript::{Miniscript, Segwitv0, Tap};
-    /// extern crate bitcoin;
-    /// extern crate sapio_miniscript as miniscript;
-    ///
-    /// use miniscript::Miniscript;
-    /// use miniscript::{Segwitv0, Tap};
     /// use miniscript::bitcoin::secp256k1::XOnlyPublicKey;
     /// use miniscript::bitcoin::hashes::hex::FromHex;
     ///

@@ -112,6 +112,8 @@ mod test {
     #[test]
     #[cfg(feature = "compiler")]
     fn basic_working() {
+        use std::str::FromStr;
+
         use bitcoin::{secp256k1::Secp256k1, util, Script};
 
         use crate::{
@@ -141,5 +143,7 @@ mod test {
         let parsed: ParsedEnvelope = envelopes[0].clone().into();
         assert_eq!(parsed.payload, test_inscription);
         println!("{:?}", script.to_string());
+        let test_script = Miniscript::from_str(&script.to_string()).expect("Should parse");
+        assert_eq!(test_script, script)
     }
 }

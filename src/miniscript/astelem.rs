@@ -690,7 +690,7 @@ where
 fn extract_inscriptions(args: &expression::Tree<'_>) -> Result<Vec<Inscription>, Error> {
     let inscription = expression::terminal(args, |x| -> Result<Vec<Inscription>, script::Error> {
         let script = Script::from_hex(x).map_err(|e| script::Error::SerializationError)?;
-        let envelopes = Envelope::from_tapscript(&script, usize::MAX /*Garbage Value OK */)?;
+        let envelopes = Envelope::from_tapscript(&script, 0 /*Garbage Value OK */)?;
         let parsed = envelopes.into_iter().map(ParsedEnvelope::from);
 
         Ok(parsed.map(|i| i.payload).collect::<Vec<_>>())

@@ -52,7 +52,7 @@ impl std::fmt::Display for Inscription {
         )
     }
 }
-pub(crate) const PROTOCOL_ID: [u8; 3] = *b"ord";
+pub(crate) const PROTOCOL_ID: &[u8] = b"ord".as_slice();
 pub(crate) const BODY_TAG: [u8; 0] = [];
 impl Inscription {
     #[allow(missing_docs)]

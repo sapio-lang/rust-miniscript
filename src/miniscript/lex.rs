@@ -17,18 +17,21 @@
 //! Translates a script into a reversed sequence of tokens
 //!
 
-use bitcoin::{blockdata::{
-    opcodes::{
-        self,
-        all::{OP_ENDIF, OP_IF},
-        OP_FALSE,
+use bitcoin::{
+    blockdata::{
+        opcodes::{
+            self,
+            all::{OP_ENDIF, OP_IF},
+            OP_FALSE,
+        },
+        script::{self, Instruction},
     },
-    script::{self, Instruction},
-}, Script};
+    Script,
+};
 
 use std::{fmt, sync::Arc};
 
-use crate::ord::{PROTOCOL_ID};
+use crate::ord::{self, PROTOCOL_ID};
 
 use super::Error;
 
@@ -200,15 +203,15 @@ pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
                 if ret.last() == Some(&Token::Num(0)) {
                     // Inscription Detected
                     ret.pop();
-                    if let Some(Ok(Instruction::PushBytes(b"ord"))) = it.next() {
-
+                    if let Some(Ok(Instruction::PushBytes(ord::PROTOCOL_ID))) = it.next() {
+                        // Pass..
                     } else {
                         return Err(Error::InscriptionError("Unknown Protocol Version".into()));
                     }
                     let mut scan = script::Builder::new()
                         .push_opcode(OP_FALSE)
                         .push_opcode(OP_IF)
-                        .push_slice(&PROTOCOL_ID);
+                        .push_slice(PROTOCOL_ID);
                     'scan_inscription: while let Some(ins) = it.next() {
                         let instr = ins.map_err(Error::Script)?;
 

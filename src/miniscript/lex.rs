@@ -203,7 +203,7 @@ pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
                 if ret.last() == Some(&Token::Num(0)) {
                     // Inscription Detected
                     ret.pop();
-                    if let Some(Ok(Instruction::PushBytes(ord::PROTOCOL_ID))) = it.next() {
+                    if let Some(Ok(Instruction::PushBytes(/*ord:: makes const pattern*/ord::PROTOCOL_ID))) = it.next() {
                         // Pass..
                     } else {
                         return Err(Error::InscriptionError("Unknown Protocol Version".into()));

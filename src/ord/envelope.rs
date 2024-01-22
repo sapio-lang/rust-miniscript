@@ -4,7 +4,7 @@ use bitcoin::{util::taproot::TAPROOT_ANNEX_PREFIX, Script, Transaction};
 #[cfg(feature="schemars")]
 use schemars::JsonSchema;
 #[cfg(feature="serde")]
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use {
     super::*,

@@ -14,7 +14,7 @@ use bitcoin::{
 #[cfg(feature = "schemars")]
 use schemars::JsonSchema;
 #[cfg(feature = "serde")]
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use self::tag::Tag;
 
@@ -97,5 +97,49 @@ impl Inscription {
         let b = script::Builder::new();
         let script: Script = self.append_reveal_script_to_builder(b).into_script();
         script.instructions().count()
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use bitcoin::XOnlyPublicKey;
+
+    use crate::policy::Concrete;
+
+    use super::Inscription;
+
+    #[test]
+    #[cfg(feature = "compiler")]
+    fn basic_working() {
+        use bitcoin::{secp256k1::Secp256k1, util, Script};
+
+        use crate::{
+            ord::envelope::{Envelope, ParsedEnvelope},
+            Miniscript, Tap,
+        };
+
+        let secp = Secp256k1::new();
+        let k = util::key::KeyPair::from_seckey_slice(&secp, &[2u8; 32][..]).unwrap();
+        let test_inscription = Inscription::new(Some("test".into()), Some("body".into()));
+        let script = Concrete::Inscribe(
+            Box::new(test_inscription.clone()),
+            Box::new(Concrete::Key(k.x_only_public_key().0)),
+        );
+        println!("{:?}", script);
+        let script: Miniscript<XOnlyPublicKey, Tap> = script.compile().unwrap();
+        match script.node {
+            crate::Terminal::InscribePost(ref insc, _)
+            | crate::Terminal::InscribePre(ref insc, _) => {
+                assert_eq!(insc[0].content_type, Some("test".into()));
+                assert_eq!(insc[0].body, Some("body".into()));
+            }
+            _ => unreachable!("Wrong Branch"),
+        }
+        let btc_script: Script = script.encode();
+        let envelopes = Envelope::from_tapscript(&btc_script, 0).expect("Should have parsed");
+        let parsed: ParsedEnvelope = envelopes[0].clone().into();
+        assert_eq!(parsed.payload, test_inscription);
+        println!("{:?}", script.to_string());
     }
 }

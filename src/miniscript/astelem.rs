@@ -23,6 +23,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, str};
 
+use bitcoin::blockdata::script::Builder;
 use bitcoin::blockdata::{opcodes, script};
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
@@ -356,6 +357,24 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Debug for Terminal<Pk, Ctx> {
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Display for Terminal<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Terminal::InscribePost(ref insc, ref sub) => {
+                let script = insc
+                    .iter()
+                    .fold(Builder::new(), |builder, i| {
+                        i.append_reveal_script_to_builder(builder)
+                    })
+                    .into_script();
+                write!(f, "inscribe_post({:x},{})", script, sub)
+            }
+            Terminal::InscribePre(ref insc, ref sub) => {
+                let script = insc
+                    .iter()
+                    .fold(Builder::new(), |builder, i| {
+                        i.append_reveal_script_to_builder(builder)
+                    })
+                    .into_script();
+                write!(f, "inscribe_pre({:x},{})", script, sub)
+            }
             Terminal::PkK(ref pk) => write!(f, "pk_k({})", pk),
             Terminal::PkH(ref pkh) => write!(f, "pk_h({})", pkh),
             Terminal::After(t) => write!(f, "after({})", t),

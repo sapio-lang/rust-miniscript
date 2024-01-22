@@ -198,6 +198,12 @@ impl Property for CompilerExtData {
             dissat_cost: Some(33.0),
         }
     }
+    fn inscribing(
+        inscription: &Arc<Vec<crate::ord::Inscription>>,
+        code: Self,
+    ) -> Result<Self, ErrorKind> {
+        Ok(code)
+    }
 
     fn from_time(_t: u32) -> Self {
         CompilerExtData {
@@ -815,6 +821,15 @@ where
     }
 
     match *policy {
+        Concrete::Inscribe(ref inscription, ref sub) => {
+            let subcomp = best_compilations(policy_cache, &sub, sat_prob, dissat_prob)?;
+            for (k, v) in subcomp {
+                insert_wrap!(AstElemExt::terminal(Terminal::InscribePre(
+                    Arc::new(vec![inscription.as_ref().clone()]),
+                    v.ms.clone()
+                )))
+            }
+        }
         Concrete::Unsatisfiable => {
             insert_wrap!(AstElemExt::terminal(Terminal::False));
         }

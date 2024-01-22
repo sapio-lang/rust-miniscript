@@ -1052,7 +1052,7 @@ mod tests {
     use super::*;
     use bitcoin;
     use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
-    use bitcoin::secp256k1::{self, Secp256k1};
+    use bitcoin::secp256k1::{self, Secp256k1, Parity};
     use miniscript::context::NoChecks;
     use Miniscript;
     use MiniscriptKey;
@@ -1066,7 +1066,7 @@ mod tests {
         Vec<bitcoin::EcdsaSig>,
         secp256k1::Message,
         Secp256k1<secp256k1::All>,
-        Vec<bitcoin::XOnlyPublicKey>,
+        Vec<(bitcoin::XOnlyPublicKey, Parity)>,
         Vec<bitcoin::SchnorrSig>,
         Vec<Vec<u8>>,
     ) {
@@ -1101,7 +1101,7 @@ mod tests {
             pks.push(pk);
             der_sigs.push(sigser);
 
-            let keypair = bitcoin::KeyPair::from_secret_key(&secp, sk);
+            let keypair = bitcoin::KeyPair::from_secret_key(&secp, &sk);
             x_only_pks.push(bitcoin::XOnlyPublicKey::from_keypair(&keypair));
             let schnorr_sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, &[0u8; 32]);
             let schnorr_sig = bitcoin::SchnorrSig {
@@ -1568,7 +1568,7 @@ mod tests {
 
         let elem = x_only_no_checks_ms(&format!(
             "multi_a(3,{},{},{},{},{})",
-            xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
+            xpks[0].0, xpks[1].0, xpks[2].0, xpks[3].0, xpks[4].0,
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
         let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack, &elem);
@@ -1578,13 +1578,13 @@ mod tests {
             multi_a_satisfied.unwrap(),
             vec![
                 SatisfiedConstraint::PublicKey {
-                    key_sig: KeySigPair::Schnorr(xpks[0], schnorr_sigs[0])
+                    key_sig: KeySigPair::Schnorr(xpks[0].0, schnorr_sigs[0])
                 },
                 SatisfiedConstraint::PublicKey {
-                    key_sig: KeySigPair::Schnorr(xpks[1], schnorr_sigs[1])
+                    key_sig: KeySigPair::Schnorr(xpks[1].0, schnorr_sigs[1])
                 },
                 SatisfiedConstraint::PublicKey {
-                    key_sig: KeySigPair::Schnorr(xpks[2], schnorr_sigs[2])
+                    key_sig: KeySigPair::Schnorr(xpks[2].0, schnorr_sigs[2])
                 },
             ]
         );
@@ -1600,7 +1600,7 @@ mod tests {
 
         let elem = x_only_no_checks_ms(&format!(
             "multi_a(3,{},{},{},{},{})",
-            xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
+            xpks[0].0, xpks[1].0, xpks[2].0, xpks[3].0, xpks[4].0,
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
         let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack.clone(), &elem);
@@ -1611,7 +1611,7 @@ mod tests {
         // multi_a wrong thresh: k = 2, but three sigs
         let elem = x_only_no_checks_ms(&format!(
             "multi_a(2,{},{},{},{},{})",
-            xpks[0], xpks[1], xpks[2], xpks[3], xpks[4],
+            xpks[0].0, xpks[1].0, xpks[2].0, xpks[3].0, xpks[4].0,
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
         let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack.clone(), &elem);
@@ -1622,7 +1622,7 @@ mod tests {
         // multi_a correct thresh, but small stack
         let elem = x_only_no_checks_ms(&format!(
             "multi_a(3,{},{},{},{},{},{})",
-            xpks[0], xpks[1], xpks[2], xpks[3], xpks[4], xpks[5]
+            xpks[0].0, xpks[1].0, xpks[2].0, xpks[3].0, xpks[4].0, xpks[5].0
         ));
         let vfyfn = vfyfn_.clone(); // sigh rust 1.29...
         let constraints = from_stack(Box::new(vfyfn), txtmpl_hash, stack, &elem);

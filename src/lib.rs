@@ -115,6 +115,8 @@ pub mod interpreter;
 pub mod miniscript;
 pub mod policy;
 pub mod psbt;
+#[allow(missing_docs)]
+pub mod ord;
 
 mod util;
 
@@ -597,6 +599,8 @@ pub enum Error {
     TrNoScriptCode,
     /// No explicit script for Tr descriptors
     TrNoExplicitScript,
+    /// Inscription System Issue
+    InscriptionError(String)
 }
 
 #[doc(hidden)]
@@ -737,6 +741,8 @@ impl fmt::Display for Error {
             Error::TrNoExplicitScript => {
                 write!(f, "No script code for Tr descriptors")
             }
+            Error::InscriptionError(ref s) => 
+                write!(f, "Inscription Error: {}", s)
         }
     }
 }

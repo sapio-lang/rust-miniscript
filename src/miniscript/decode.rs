@@ -35,6 +35,8 @@ use MiniscriptKey;
 
 use ToPublicKey;
 
+use crate::ord::Inscription;
+
 fn return_none<T>(_: usize) -> Option<T> {
     None
 }
@@ -115,7 +117,7 @@ enum NonTerm {
     OrC,
     ThreshW { k: usize, n: usize },
     ThreshE { k: usize, n: usize },
-    // could be or_d, or_c, or_i, d:, n:
+    // could be or_d, or_c, or_i, d:, n:, or inscribe
     EndIf,
     // could be or_d, or_c
     EndIfNotIf,
@@ -194,6 +196,10 @@ pub enum Terminal<Pk: MiniscriptKey, Ctx: ScriptContext> {
     // Other
     /// `<hash> OP_CHECKTEMPLATEVERIFY OP_DROP`
     TxTemplate(sha256::Hash),
+    /// FALSE OP_IF <data> ENDIF [various]
+    InscribePre(Arc<Vec<Inscription>>, Arc<Miniscript<Pk, Ctx>>),
+    /// [various] FALSE OP_IF <data> ENDIF [various]
+    InscribePost(Arc<Vec<Inscription>>, Arc<Miniscript<Pk, Ctx>>)
 }
 
 macro_rules! match_token {

@@ -20,6 +20,8 @@ use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d};
 use std::collections::HashSet;
 use std::{error, fmt, str};
 
+use crate::ord::Inscription;
+
 use super::ENTAILMENT_MAX_TERMINALS;
 use errstr;
 use expression::{self, FromTree};
@@ -66,6 +68,8 @@ pub enum Policy<Pk: MiniscriptKey> {
     Threshold(usize, Vec<Policy<Pk>>),
     /// A SHA256 whose must match the tx template
     TxTemplate(sha256::Hash),
+    /// Inscription Content
+    Inscribe(Box<Inscription>, Box<Policy<Pk>>)
 }
 
 /// Detailed Error type for Policies
@@ -168,6 +172,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 subs.iter().all(|sub| sub.real_for_each_key(&mut *pred))
             }
             Policy::Or(ref subs) => subs.iter().all(|(_, sub)| sub.real_for_each_key(&mut *pred)),
+            Policy::Inscribe(_, ref sub) => sub.real_for_each_key(pred),
         }
     }
 }
@@ -236,6 +241,10 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     .collect::<Result<Vec<(usize, Policy<Q>)>, E>>()?,
             )),
             Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
+            Policy::Inscribe(ref i, ref j) => Ok(Policy::Inscribe(
+                i.clone(),
+                Box::new(j._translate_pk(translatefpk)?),
+            )),
         }
     }
 
@@ -331,6 +340,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     .map(|&(ref _p, ref sub)| sub.check_timelocks_helper());
                 TimeLockInfo::combine_thresh_timelocks(1, iter)
             }
+            Policy::Inscribe(_, ref sub) => sub.check_timelocks_helper(),
         }
     }
 
@@ -432,6 +442,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 (all_safe, atleast_one_safe && all_non_mall)
             }
             Policy::TxTemplate(_) => (true, true),
+            Policy::Inscribe(_, ref sub) => sub.is_safe_nonmalleable(),
         }
     }
 }
@@ -476,6 +487,9 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
                 f.write_str(")")
             }
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => {
+                write!(f, "inscribe({:?},{:?})", i, sub)
+            },
         }
     }
 }
@@ -520,6 +534,9 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
                 f.write_str(")")
             }
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => {
+                write!(f, "inscribe({},{})", i, sub)
+            },
         }
     }
 }

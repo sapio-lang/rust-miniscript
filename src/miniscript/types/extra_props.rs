@@ -9,6 +9,7 @@ use super::{Error, ErrorKind, Property, ScriptContext};
 use script_num_size;
 use std::cmp;
 use std::iter::once;
+use std::sync::Arc;
 use MiniscriptKey;
 use Terminal;
 
@@ -1055,7 +1056,8 @@ impl Property for ExtData {
                 // Note that for CLTV this is a limitation not of Bitcoin but Miniscript. The
                 // number on the stack would be a 5 bytes signed integer but Miniscript's B type
                 // only consumes 4 bytes from the stack.
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -1064,7 +1066,8 @@ impl Property for ExtData {
                 Ok(Self::from_after(t))
             }
             Terminal::Older(t) => {
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -1141,11 +1144,45 @@ impl Property for ExtData {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
+            Terminal::InscribePre(ref i, ref c) | Terminal::InscribePost(ref i, ref c) => {
+                wrap_err(Self::inscribing(&i, c.ext.clone()))
+            }
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()
         }
         ret
+    }
+
+    fn inscribing(
+        inscription: &Arc<Vec<crate::ord::Inscription>>,
+        r: Self,
+    ) -> Result<Self, ErrorKind> {
+        // TODO: No idea if this is correct...
+        Ok(ExtData {
+            pk_cost: inscription.iter().map(|i| i.size_guess()).sum::<usize>() + r.pk_cost,
+            has_free_verify: r.has_free_verify,
+            ops_count_static: inscription.iter().map(|i| i.instruction_count()).sum::<usize>() + r.ops_count_static,
+            ops_count_sat:  /*+3 = FALSE OP_IF ... ENDIF */ Some(r.ops_count_sat.unwrap_or(0)+3),
+            ops_count_nsat: Some(r.ops_count_nsat.unwrap_or(0)+3),
+            // unclear if this means *during* execution, or if it means in witness...
+            // I think given after behavior, seems to be only on witness stack
+            stack_elem_count_sat: r.stack_elem_count_sat,
+            stack_elem_count_dissat: r.stack_elem_count_dissat,
+            max_sat_size: r.max_sat_size,
+            max_dissat_size: r.max_dissat_size,
+            timelock_info: r.timelock_info,
+            // Inscribing uses one stack element
+            exec_stack_elem_count_sat: opt_max(
+                Some(1),
+                r.exec_stack_elem_count_sat,
+            ),
+            exec_stack_elem_count_dissat: opt_max(
+                // given the behavior of after's execdata
+                Some(0),
+                r.exec_stack_elem_count_dissat,
+            ),
+        })
     }
 }
 

@@ -26,6 +26,7 @@ use std::{fmt, str};
 use bitcoin::blockdata::{opcodes, script};
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
+use bitcoin::Script;
 
 use errstr;
 use expression;
@@ -35,6 +36,9 @@ use miniscript::ScriptContext;
 use script_num_size;
 
 use util::MsKeyBuilder;
+
+use crate::ord::envelope::{Envelope, ParsedEnvelope};
+use crate::ord::Inscription;
 use {Error, ForEach, ForEachKey, Miniscript, MiniscriptKey, Terminal, ToPublicKey, TranslatePk};
 
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
@@ -123,6 +127,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
             Terminal::Thresh(_, ref subs) => subs.iter().all(|sub| sub.real_for_each_key(pred)),
             Terminal::Multi(_, ref keys) | Terminal::MultiA(_, ref keys) => {
                 keys.iter().all(|key| pred(ForEach::Key(key)))
+            }
+            Terminal::InscribePre(_, ref m) | Terminal::InscribePost(_, ref m) => {
+                m.real_for_each_key(pred)
             }
         }
     }
@@ -219,6 +226,14 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                 Terminal::MultiA(k, keys?)
             }
             Terminal::TxTemplate(x) => Terminal::TxTemplate(x),
+            Terminal::InscribePre(ref a, ref b) => Terminal::InscribePre(
+                a.clone(),
+                Arc::new(b.real_translate_pk(translatefpk, translatefpkh)?),
+            ),
+            Terminal::InscribePost(ref a, ref b) => Terminal::InscribePost(
+                a.clone(),
+                Arc::new(b.real_translate_pk(translatefpk, translatefpkh)?),
+            ),
         };
         Ok(frag)
     }
@@ -594,6 +609,16 @@ where
             ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
                 sha256::Hash::from_hex(x).map(Terminal::TxTemplate)
             }),
+            ("inscribe_pre", 2) => {
+                let inscription = extract_inscriptions(&top.args[0])?;
+                let expr = expression::FromTree::from_tree(&top.args[1])?;
+                Ok(Terminal::InscribePre(Arc::new(inscription), expr))
+            }
+            ("inscribe_post", 2) => {
+                let expr = expression::FromTree::from_tree(&top.args[0])?;
+                let inscription = extract_inscriptions(&top.args[1])?;
+                Ok(Terminal::InscribePost(Arc::new(inscription), expr))
+            }
             _ => Err(Error::Unexpected(format!(
                 "{}({} args) while parsing Miniscript",
                 top.name,
@@ -641,6 +666,18 @@ where
         Ctx::check_global_validity(&ms)?;
         Ok(ms.node)
     }
+}
+
+fn extract_inscriptions(args: &expression::Tree<'_>) -> Result<Vec<Inscription>, Error> {
+    let inscription = expression::terminal(args, |x| -> Result<Vec<Inscription>, script::Error> {
+        let script = Script::from_hex(x).map_err(|e| script::Error::SerializationError)?;
+        let envelopes = Envelope::from_tapscript(&script, usize::MAX /*Garbage Value OK */)?;
+        let parsed = envelopes.into_iter().map(ParsedEnvelope::from);
+
+        Ok(parsed.map(|i| i.payload).collect::<Vec<_>>())
+    })
+    .map_err(|e| Error::InscriptionError(e.to_string()))?;
+    Ok(inscription)
 }
 
 /// Helper trait to add a `push_astelem` method to `script::Builder`
@@ -801,6 +838,18 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                 .push_slice(&h[..])
                 .push_opcode(opcodes::all::OP_NOP4)
                 .push_opcode(opcodes::all::OP_DROP),
+            Terminal::InscribePre(ref a, ref b) => {
+                builder = a.iter().fold(builder, |builder, insc| {
+                    insc.append_reveal_script_to_builder(builder)
+                });
+                builder.push_astelem(&b)
+            }
+            Terminal::InscribePost(ref a, ref b) => {
+                builder = builder.push_astelem(&b);
+                a.iter().fold(builder, |builder, insc| {
+                    insc.append_reveal_script_to_builder(builder)
+                })
+            }
         }
     }
 
@@ -862,6 +911,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                     + pks.len() // n times CHECKSIGADD
             }
             Terminal::TxTemplate(..) => 33 + 2,
+            Terminal::InscribePost(ref i, ref rest) | Terminal::InscribePre(ref i, ref rest) => {
+                rest.script_size() + i.iter().map(|j| j.size_guess()).sum::<usize>()
+            }
         }
     }
 }

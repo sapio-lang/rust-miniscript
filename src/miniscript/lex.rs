@@ -17,14 +17,23 @@
 //! Translates a script into a reversed sequence of tokens
 //!
 
-use bitcoin::blockdata::{opcodes, script};
+use bitcoin::{blockdata::{
+    opcodes::{
+        self,
+        all::{OP_ENDIF, OP_IF},
+        OP_FALSE,
+    },
+    script::{self, Instruction},
+}, Script};
 
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+use crate::ord::{PROTOCOL_ID};
 
 use super::Error;
 
 /// Atom of a tokenized version of a script
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum Token<'s> {
     BoolAnd,
@@ -60,16 +69,21 @@ pub enum Token<'s> {
     Bytes32(&'s [u8]),
     Bytes33(&'s [u8]),
     Bytes65(&'s [u8]),
+    Inscription(Arc<Script>),
 }
 
 impl<'s> fmt::Display for Token<'s> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self.clone() {
             Token::Num(n) => write!(f, "#{}", n),
             Token::Hash20(b) | Token::Bytes33(b) | Token::Bytes32(b) | Token::Bytes65(b) => {
                 for ch in &b[..] {
                     write!(f, "{:02x}", *ch)?;
                 }
+                Ok(())
+            }
+            Token::Inscription(ref ins) => {
+                write!(f, "Inscribe({})", ins.asm())?;
                 Ok(())
             }
             x => write!(f, "{:?}", x),
@@ -117,7 +131,8 @@ impl<'s> Iterator for TokenIter<'s> {
 pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
     let mut ret = Vec::with_capacity(script.len());
 
-    for ins in script.instructions_minimal() {
+    let mut it = script.instructions_minimal();
+    while let Some(ins) = it.next() {
         match ins.map_err(Error::Script)? {
             script::Instruction::Op(opcodes::all::OP_BOOLAND) => {
                 ret.push(Token::BoolAnd);
@@ -182,7 +197,50 @@ pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
                 ret.push(Token::Add);
             }
             script::Instruction::Op(opcodes::all::OP_IF) => {
-                ret.push(Token::If);
+                if ret.last() == Some(&Token::Num(0)) {
+                    // Inscription Detected
+                    ret.pop();
+                    if let Some(Ok(Instruction::PushBytes(b"ord"))) = it.next() {
+
+                    } else {
+                        return Err(Error::InscriptionError("Unknown Protocol Version".into()));
+                    }
+                    let mut scan = script::Builder::new()
+                        .push_opcode(OP_FALSE)
+                        .push_opcode(OP_IF)
+                        .push_slice(&PROTOCOL_ID);
+                    'scan_inscription: while let Some(ins) = it.next() {
+                        let instr = ins.map_err(Error::Script)?;
+
+                        match instr {
+                            script::Instruction::Op(OP_ENDIF) => {
+                                scan = scan.push_opcode(OP_ENDIF);
+                                break 'scan_inscription;
+                            }
+                            script::Instruction::PushBytes(p) => {
+                                scan = scan.push_slice(p);
+                            }
+                            script::Instruction::Op(a)
+                                if matches!(
+                                    a.classify(
+                                        opcodes::ClassifyContext::TapScript, /*Either Works */
+                                    ),
+                                    opcodes::Class::PushNum(_)
+                                ) =>
+                            {
+                                scan = scan.push_opcode(a);
+                            }
+                            _ => {
+                                return Err(Error::InscriptionError(
+                                    "Inscription must be Push Only".into(),
+                                ))
+                            }
+                        }
+                    }
+                    ret.push(Token::Inscription(Arc::new(scan.into_script())))
+                } else {
+                    ret.push(Token::If);
+                }
             }
             script::Instruction::Op(opcodes::all::OP_IFDUP) => {
                 ret.push(Token::IfDup);

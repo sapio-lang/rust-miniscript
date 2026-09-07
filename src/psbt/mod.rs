@@ -369,6 +369,18 @@ pub(crate) fn get_ctv_hash(tx: &bitcoin::Transaction, input_index: u32) -> sha25
     let mut ctv_hash = sha256::Hash::engine();
     tx.version.consensus_encode(&mut ctv_hash).unwrap();
     tx.lock_time.consensus_encode(&mut ctv_hash).unwrap();
+    if tx.input.iter().any(|input| !input.script_sig.is_empty()) {
+        let mut enc = sha256::Hash::engine();
+        // A nonempty scriptSig commits every input's serialized scriptSig,
+        // including the length prefix of empty scriptSigs on other inputs.
+        for input in &tx.input {
+            input.script_sig.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .into_inner()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
     (tx.input.len() as u32)
         .consensus_encode(&mut ctv_hash)
         .unwrap();

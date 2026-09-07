@@ -100,7 +100,7 @@ impl Inscription {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod test {
 
     use bitcoin::XOnlyPublicKey;
@@ -110,7 +110,6 @@ mod test {
     use super::Inscription;
 
     #[test]
-    #[cfg(feature = "compiler")]
     fn basic_working() {
         use std::str::FromStr;
 

@@ -6,6 +6,9 @@ repository = "https://github.com/sapio-lang/rust-miniscript"
 description = "Miniscript: a subset of Bitcoin Script designed for analysis, Sapio extended edition (supports BIP-119 OP_CTV)"
 license = "CC0-1.0"
 
+[workspace]
+exclude = ["integration_test", "fuzz"]
+
 [features]
 compiler = []
 trace = []
@@ -26,6 +29,9 @@ optional = true
 version = "1.0"
 optional = true
 features = ["derive"]
+
+[dev-dependencies]
+serde_json = "1.0"
 
 [[example]]
 name = "htlc"

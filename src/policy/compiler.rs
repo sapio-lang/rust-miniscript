@@ -36,10 +36,16 @@ type PolicyCache<Pk, Ctx> =
     BTreeMap<(Concrete<Pk>, OrdF64, Option<OrdF64>), BTreeMap<CompilationKey, AstElemExt<Pk, Ctx>>>;
 
 ///Ordered f64 for comparison
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 struct OrdF64(f64);
 
 impl Eq for OrdF64 {}
+impl PartialOrd for OrdF64 {
+    fn partial_cmp(&self, other: &OrdF64) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Ord for OrdF64 {
     fn cmp(&self, other: &OrdF64) -> cmp::Ordering {
         // will panic if given NaN
@@ -92,7 +98,9 @@ impl From<policy::concrete::PolicyError> for CompilerError {
 /// Hash required for using OrdF64 as key for hashmap
 impl hash::Hash for OrdF64 {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
+        // Floating-point equality treats positive and negative zero as equal.
+        let bits = if self.0 == 0.0 { 0 } else { self.0.to_bits() };
+        bits.hash(state);
     }
 }
 
@@ -1199,6 +1207,22 @@ mod tests {
     type BPolicy = Concrete<bitcoin::PublicKey>;
     type DummyTapAstElemExt = policy::compiler::AstElemExt<String, Tap>;
     type SegwitMiniScript = Miniscript<bitcoin::PublicKey, Segwitv0>;
+
+    #[test]
+    fn ordered_float_signed_zeros_hash_equally() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let positive_zero = OrdF64(0.0);
+        let negative_zero = OrdF64(-0.0);
+        assert_eq!(positive_zero, negative_zero);
+
+        let mut positive_hash = DefaultHasher::new();
+        let mut negative_hash = DefaultHasher::new();
+        positive_zero.hash(&mut positive_hash);
+        negative_zero.hash(&mut negative_hash);
+        assert_eq!(positive_hash.finish(), negative_hash.finish());
+    }
 
     fn pubkeys_and_a_sig(n: usize) -> (Vec<bitcoin::PublicKey>, secp256k1::ecdsa::Signature) {
         let mut ret = Vec::with_capacity(n);

@@ -160,10 +160,15 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// A |- B means every satisfaction of A is also a satisfaction of B.
     /// This implementation will run slow for larger policies but should be sufficient for
     /// most practical policies.
+    /// Returns an error if either policy contains inscription effects, which
+    /// this spending-condition algorithm cannot represent.
 
     // This algorithm has a naive implementation. It is possible to optimize this
     // by memoizing and maintaining a hashmap.
     pub fn entails(self, other: Policy<Pk>) -> Result<bool, PolicyError> {
+        if self.contains_inscription() || other.contains_inscription() {
+            return Err(PolicyError::InscriptionEntailmentUnsupported);
+        }
         if self.n_terminals() > ENTAILMENT_MAX_TERMINALS {
             return Err(PolicyError::EntailmentMaxTerminals);
         }
@@ -185,6 +190,14 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 );
                 Ok(Policy::entails(a1, b1)? && Policy::entails(a2, b2)?)
             }
+        }
+    }
+
+    fn contains_inscription(&self) -> bool {
+        match *self {
+            Policy::Inscribe(..) => true,
+            Policy::Threshold(_, ref subs) => subs.iter().any(Policy::contains_inscription),
+            _ => false,
         }
     }
 
@@ -420,6 +433,10 @@ where
             ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
                 sha256::Hash::from_hex(x).map(Policy::TxTemplate)
             }),
+            ("inscribe", 2) => Ok(Policy::Inscribe(
+                super::parse_inscription(&top.args[0])?,
+                Box::new(Policy::from_tree(&top.args[1])?),
+            )),
 
             _ => Err(errstr(top.name)),
         }
@@ -431,6 +448,10 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// `Unsatisfiable`s. Does not reorder any branches; use `.sort`.
     pub fn normalized(self) -> Policy<Pk> {
         match self {
+            Policy::Inscribe(inscription, sub) => match sub.normalized() {
+                Policy::Unsatisfiable => Policy::Unsatisfiable,
+                child => Policy::Inscribe(inscription, Box::new(child)),
+            },
             Policy::Threshold(k, subs) => {
                 let mut ret_subs = Vec::with_capacity(subs.len());
 
@@ -521,7 +542,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 acc.extend(x.real_relative_timelocks());
                 acc
             }),
-            Policy::Inscribe(_, ref subs) => subs.real_relative_timelocks()
+            Policy::Inscribe(_, ref subs) => subs.real_relative_timelocks(),
         }
     }
 
@@ -568,6 +589,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// that are not satisfied at the given age.
     pub fn at_age(mut self, time: u32) -> Policy<Pk> {
         self = match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.at_age(time)))
+            }
             Policy::Older(t) => {
                 if t > time {
                     Policy::Unsatisfiable
@@ -587,6 +611,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// that are not satisfied at the given age.
     pub fn at_height(mut self, time: u32) -> Policy<Pk> {
         self = match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.at_height(time)))
+            }
             Policy::After(t) => {
                 if t > time {
                     Policy::Unsatisfiable
@@ -658,6 +685,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// implemented.
     pub fn sorted(self) -> Policy<Pk> {
         match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.sorted()))
+            }
             Policy::Threshold(k, subs) => {
                 let mut new_subs: Vec<_> = subs.into_iter().map(Policy::sorted).collect();
                 new_subs.sort();

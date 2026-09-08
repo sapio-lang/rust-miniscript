@@ -1144,8 +1144,30 @@ impl Property for ExtData {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
-            Terminal::InscribePre(ref i, ref c) | Terminal::InscribePost(ref i, ref c) => {
-                wrap_err(Self::inscribing(&i, c.ext.clone()))
+            Terminal::InscribePre(ref i, ref c) => wrap_err(Self::inscribing(i, c.ext)),
+            Terminal::InscribePost(ref i, ref c) => {
+                wrap_err(Self::inscribing(i, c.ext)).map(|mut ext| {
+                    if !i.is_empty() {
+                        // ENDIF cannot be combined with a following VERIFY.
+                        ext.has_free_verify = false;
+                        // The temporary FALSE follows the child's result. A V
+                        // fragment leaves no result; all other bases may do so.
+                        let stack_growth = if c.ty.corr.base == super::Base::V {
+                            1
+                        } else {
+                            2
+                        };
+                        ext.exec_stack_elem_count_sat = c
+                            .ext
+                            .exec_stack_elem_count_sat
+                            .map(|count| cmp::max(count, stack_growth));
+                        ext.exec_stack_elem_count_dissat = c
+                            .ext
+                            .exec_stack_elem_count_dissat
+                            .map(|count| cmp::max(count, stack_growth));
+                    }
+                    ext
+                })
             }
         };
         if let Ok(ref ret) = ret {
@@ -1156,33 +1178,26 @@ impl Property for ExtData {
 
     fn inscribing(
         inscription: &Arc<Vec<crate::ord::Inscription>>,
-        r: Self,
+        mut r: Self,
     ) -> Result<Self, ErrorKind> {
-        // TODO: No idea if this is correct...
-        Ok(ExtData {
-            pk_cost: inscription.iter().map(|i| i.size_guess()).sum::<usize>() + r.pk_cost,
-            has_free_verify: r.has_free_verify,
-            ops_count_static: inscription.iter().map(|i| i.instruction_count()).sum::<usize>() + r.ops_count_static,
-            ops_count_sat:  /*+3 = FALSE OP_IF ... ENDIF */ Some(r.ops_count_sat.unwrap_or(0)+3),
-            ops_count_nsat: Some(r.ops_count_nsat.unwrap_or(0)+3),
-            // unclear if this means *during* execution, or if it means in witness...
-            // I think given after behavior, seems to be only on witness stack
-            stack_elem_count_sat: r.stack_elem_count_sat,
-            stack_elem_count_dissat: r.stack_elem_count_dissat,
-            max_sat_size: r.max_sat_size,
-            max_dissat_size: r.max_dissat_size,
-            timelock_info: r.timelock_info,
-            // Inscribing uses one stack element
-            exec_stack_elem_count_sat: opt_max(
-                Some(1),
-                r.exec_stack_elem_count_sat,
-            ),
-            exec_stack_elem_count_dissat: opt_max(
-                // given the behavior of after's execdata
-                Some(0),
-                r.exec_stack_elem_count_dissat,
-            ),
-        })
+        if inscription.is_empty() {
+            return Err(ErrorKind::InvalidInscription);
+        }
+        for item in inscription.iter() {
+            item.validate().map_err(|_| ErrorKind::InvalidInscription)?;
+        }
+        // Only IF and ENDIF count toward the legacy opcode limit. The
+        // canonical envelope contains only pushes in its unexecuted body.
+        let ops = 2 * inscription.len();
+        r.pk_cost += inscription.iter().map(|i| i.size_guess()).sum::<usize>();
+        r.ops_count_static += ops;
+        r.ops_count_sat = r.ops_count_sat.map(|count| count + ops);
+        r.ops_count_nsat = r.ops_count_nsat.map(|count| count + ops);
+        r.exec_stack_elem_count_sat = r.exec_stack_elem_count_sat.map(|count| cmp::max(count, 1));
+        r.exec_stack_elem_count_dissat = r
+            .exec_stack_elem_count_dissat
+            .map(|count| cmp::max(count, 1));
+        Ok(r)
     }
 }
 

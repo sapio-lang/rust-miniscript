@@ -3,10 +3,18 @@ extern crate sapio_miniscript as miniscript;
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::blockdata::script::Instruction;
-use bitcoin::{PublicKey, Script};
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
+use bitcoin::util::sighash::{Prevouts, SighashCache};
+use bitcoin::util::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+use bitcoin::{OutPoint, PublicKey, SchnorrSig, SchnorrSighashType, Script};
+use bitcoin::{Transaction, TxIn, TxOut, Witness, XOnlyPublicKey};
+use miniscript::interpreter::Interpreter;
 use miniscript::ord::Inscription;
 use miniscript::policy::{concrete::PolicyError, Concrete, Semantic};
-use miniscript::{Miniscript, Segwitv0, Terminal};
+use miniscript::psbt::{interpreter_check, PsbtExt};
+use miniscript::{Miniscript, Segwitv0, Tap, Terminal};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -202,4 +210,134 @@ fn entailment_explicitly_rejects_unsupported_inscription_effects() {
     assert!(child.clone().entails(inscribed.clone()).is_err());
     let nested = Semantic::Threshold(1, vec![inscribed, child.clone()]);
     assert!(nested.entails(child).is_err());
+}
+
+#[test]
+fn interpreter_checks_the_condition_inside_an_inscription() {
+    for &postfix in &[false, true] {
+        for &satisfied in &[false, true] {
+            let child = Ms::from_ast(if satisfied {
+                Terminal::True
+            } else {
+                Terminal::False
+            })
+            .unwrap();
+            let script = wrap(child, 1, postfix).encode();
+            let spk = script.to_v0_p2wsh();
+            let script_sig = Script::new();
+            let witness = Witness::from_vec(vec![script.into_bytes()]);
+            let interpreter = Interpreter::from_txdata(
+                &spk,
+                &script_sig,
+                &witness,
+                0,
+                0,
+                sha256::Hash::from_inner([0; 32]),
+            )
+            .unwrap();
+            let result = interpreter
+                .iter_assume_sigs()
+                .collect::<Result<Vec<_>, _>>();
+            assert_eq!(result.is_ok(), satisfied);
+        }
+    }
+}
+
+#[test]
+fn signed_taproot_inscriptions_finalize_and_reject_invalid_signatures() {
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[1; 32]).unwrap());
+    let public_key = keypair.x_only_public_key().0;
+    for &postfix in &[false, true] {
+        let child = Arc::new(
+            Miniscript::<XOnlyPublicKey, Tap>::from_str(&format!("pk({})", public_key)).unwrap(),
+        );
+        let inscriptions = Arc::new(vec![Inscription::new(
+            Some(b"text/plain".to_vec()),
+            Some(b"signed inscription".to_vec()),
+        )]);
+        let script = Miniscript::from_ast(if postfix {
+            Terminal::InscribePost(inscriptions, child)
+        } else {
+            Terminal::InscribePre(inscriptions, child)
+        })
+        .unwrap()
+        .encode();
+        let spend_info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())
+            .unwrap()
+            .finalize(&secp, public_key)
+            .unwrap();
+        let funding = Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: 10_000,
+                script_pubkey: Script::new_v1_p2tr_tweaked(spend_info.output_key()),
+            }],
+        };
+        let mut tx = Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: 9_000,
+                script_pubkey: Script::new(),
+            }],
+        };
+        tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+        let leaf = (script.clone(), LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&leaf.0, leaf.1);
+        let hash_ty = SchnorrSighashType::Default;
+        let hash = SighashCache::new(&tx)
+            .taproot_script_spend_signature_hash(
+                0,
+                &Prevouts::All(&funding.output),
+                leaf_hash,
+                hash_ty,
+            )
+            .unwrap();
+        let signature = SchnorrSig {
+            sig: secp.sign_schnorr_no_aux_rand(
+                &Message::from_digest_slice(&hash[..]).unwrap(),
+                &keypair,
+            ),
+            hash_ty,
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
+        psbt.inputs[0].sighash_type = Some(hash_ty.into());
+        psbt.inputs[0]
+            .tap_scripts
+            .insert(spend_info.control_block(&leaf).unwrap(), leaf);
+        psbt.inputs[0]
+            .tap_script_sigs
+            .insert((public_key, leaf_hash), signature);
+
+        // This signature is well formed but commits to a different message.
+        let invalid_signature = SchnorrSig {
+            sig: secp
+                .sign_schnorr_no_aux_rand(&Message::from_digest_slice(&[0; 32]).unwrap(), &keypair),
+            hash_ty,
+        };
+        let mut invalid = psbt.clone();
+        invalid.inputs[0]
+            .tap_script_sigs
+            .insert((public_key, leaf_hash), invalid_signature);
+        assert!(invalid.finalize_mut(&secp).is_err());
+
+        psbt.finalize_mut(&secp).unwrap();
+        interpreter_check(&psbt, &secp).unwrap();
+        let extracted = psbt.extract(&secp).unwrap();
+        let witness = extracted.input[0].witness.to_vec();
+        assert_eq!(witness.len(), 3);
+        assert_eq!(witness[1], script.as_bytes());
+
+        let mut corrupted = witness;
+        corrupted[0] = invalid_signature.to_vec();
+        psbt.inputs[0].final_script_witness = Some(Witness::from_vec(corrupted));
+        assert!(interpreter_check(&psbt, &secp).is_err());
+        assert!(psbt.extract(&secp).is_err());
+    }
 }

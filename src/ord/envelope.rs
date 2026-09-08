@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, convert::TryInto};
 
 use bitcoin::{util::taproot::TAPROOT_ANNEX_PREFIX, Script, Transaction};
-#[cfg(feature="schemars")]
+#[cfg(feature = "schemars")]
 use schemars::JsonSchema;
-#[cfg(feature="serde")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use {
@@ -19,14 +19,13 @@ use {
     std::iter::Peekable,
 };
 
-
 type Result<T> = std::result::Result<T, script::Error>;
 type RawEnvelope = Envelope<Vec<Vec<u8>>>;
 pub(crate) type ParsedEnvelope = Envelope<Inscription>;
 
 #[derive(Default, PartialEq, Clone, Debug, Eq)]
-#[cfg_attr(feature="serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature="schemars", derive(JsonSchema))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
 pub struct Envelope<T> {
     pub input: u32,
     pub offset: u32,
@@ -110,18 +109,18 @@ impl RawEnvelope {
         let mut envelopes = Vec::new();
 
         for (i, input) in transaction.input.iter().enumerate() {
-            let has_annex = input.witness.last().map(|a| a.first().cloned()).flatten()
-                == Some(TAPROOT_ANNEX_PREFIX);
+            let has_annex = input.witness.len() >= 2
+                && input.witness.last().and_then(|item| item.first()).copied()
+                    == Some(TAPROOT_ANNEX_PREFIX);
             let offset = if has_annex { 3 } else { 2 };
-            // TODO: Check Accurately gets tapscript
+            // Ignore empty/key-path witnesses. In a script-path witness the
+            // script precedes the control block and any trailing annex.
             let tapscript = input
                 .witness
-                .iter()
-                .skip(input.witness.len() - 1 - offset)
-                .take(1)
-                .next()
-                .map(|e| e.to_vec())
-                .map(Script::from);
+                .len()
+                .checked_sub(offset)
+                .and_then(|index| input.witness.iter().nth(index))
+                .map(|bytes| Script::from(bytes.to_vec()));
             if let Some(tapscript) = tapscript {
                 if let Ok(input_envelopes) = Self::from_tapscript(&tapscript, i) {
                     envelopes.extend(input_envelopes);
@@ -133,6 +132,9 @@ impl RawEnvelope {
     }
 
     pub fn from_tapscript(tapscript: &Script, input: usize) -> Result<Vec<Self>> {
+        let input = input
+            .try_into()
+            .map_err(|_| script::Error::NumericOverflow)?;
         let mut envelopes = Vec::new();
 
         let mut instructions = tapscript.instructions().peekable();
@@ -164,7 +166,7 @@ impl RawEnvelope {
 
     fn from_instructions(
         instructions: &mut Peekable<Instructions>,
-        input: usize,
+        input: u32,
         offset: usize,
         stutter: bool,
     ) -> Result<(bool, Option<Self>)> {
@@ -189,8 +191,10 @@ impl RawEnvelope {
                     return Ok((
                         false,
                         Some(Envelope {
-                            input: input.try_into().unwrap(),
-                            offset: offset.try_into().unwrap(),
+                            input,
+                            offset: offset
+                                .try_into()
+                                .map_err(|_| script::Error::NumericOverflow)?,
                             payload,
                             pushnum,
                             stutter,

@@ -44,7 +44,7 @@ impl Tag {
             let mut tmp = script::Builder::new();
             mem::swap(&mut tmp, builder);
 
-            if self.is_chunked() {
+            if self.is_chunked() && !value.is_empty() {
                 for chunk in value.chunks(MAX_SCRIPT_ELEMENT_SIZE) {
                     tmp = tmp.push_slice(self.bytes()).push_slice(chunk);
                 }

@@ -55,6 +55,32 @@ impl std::fmt::Display for Inscription {
 pub(crate) const PROTOCOL_ID: &[u8] = b"ord".as_slice();
 pub(crate) const BODY_TAG: [u8; 0] = [];
 impl Inscription {
+    /// Check the consensus push-size bound for fields that cannot be chunked.
+    /// Body and metadata are split into script elements by the encoder.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        for (name, field) in [
+            ("content type", &self.content_type),
+            ("content encoding", &self.content_encoding),
+            ("metaprotocol", &self.metaprotocol),
+            ("parent", &self.parent),
+            ("delegate", &self.delegate),
+            ("pointer", &self.pointer),
+        ]
+        .iter()
+        {
+            if field
+                .as_ref()
+                .map_or(false, |value| value.len() > MAX_SCRIPT_ELEMENT_SIZE)
+            {
+                return Err(crate::Error::InscriptionError(format!(
+                    "{} exceeds the {}-byte script element limit",
+                    name, MAX_SCRIPT_ELEMENT_SIZE
+                )));
+            }
+        }
+        Ok(())
+    }
+
     #[allow(missing_docs)]
     pub fn new(content_type: Option<Vec<u8>>, body: Option<Vec<u8>>) -> Self {
         Self {
@@ -98,6 +124,37 @@ impl Inscription {
         let script: Script = self.append_reveal_script_to_builder(b).into_script();
         script.instructions().count()
     }
+}
+
+// A Miniscript is a commitment to exact script bytes. The discovery scanner is
+// deliberately permissive, but its interpreted fields cannot preserve arbitrary
+// encodings or unknown fields. Accept only complete, reconstructable envelopes.
+pub(crate) fn parse_inscriptions(script: &Script) -> Result<Vec<Inscription>, crate::Error> {
+    let raw = envelope::Envelope::from_tapscript(script, 0)
+        .map_err(|error| crate::Error::InscriptionError(error.to_string()))?;
+    if raw.is_empty() {
+        return Err(crate::Error::InscriptionError(
+            "expected an inscription envelope".into(),
+        ));
+    }
+    let inscriptions: Vec<_> = raw
+        .into_iter()
+        .map(|raw| {
+            let parsed: envelope::Envelope<Inscription> = raw.into();
+            parsed.payload
+        })
+        .collect();
+    let mut builder = Builder::new();
+    for inscription in &inscriptions {
+        inscription.validate()?;
+        builder = inscription.append_reveal_script_to_builder(builder);
+    }
+    if builder.into_script() != *script {
+        return Err(crate::Error::InscriptionError(
+            "envelope cannot be represented without changing its script bytes".into(),
+        ));
+    }
+    Ok(inscriptions)
 }
 
 #[cfg(all(test, feature = "compiler"))]

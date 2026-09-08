@@ -38,7 +38,6 @@ use script_num_size;
 
 use util::MsKeyBuilder;
 
-use crate::ord::envelope::{Envelope, ParsedEnvelope};
 use crate::ord::Inscription;
 use {Error, ForEach, ForEachKey, Miniscript, MiniscriptKey, Terminal, ToPublicKey, TranslatePk};
 
@@ -297,6 +296,12 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Debug for Terminal<Pk, Ctx> {
             write!(f, "{:?}", sub)
         } else {
             match *self {
+                Terminal::InscribePre(ref inscriptions, ref sub) => {
+                    write!(f, "inscribe_pre({:?},{:?})", inscriptions, sub)
+                }
+                Terminal::InscribePost(ref inscriptions, ref sub) => {
+                    write!(f, "inscribe_post({:?},{:?})", inscriptions, sub)
+                }
                 Terminal::PkK(ref pk) => write!(f, "pk_k({:?})", pk),
                 Terminal::PkH(ref pkh) => write!(f, "pk_h({:?})", pkh),
                 Terminal::After(t) => write!(f, "after({})", t),
@@ -634,8 +639,8 @@ where
                 Ok(Terminal::InscribePre(Arc::new(inscription), expr))
             }
             ("inscribe_post", 2) => {
-                let expr = expression::FromTree::from_tree(&top.args[0])?;
-                let inscription = extract_inscriptions(&top.args[1])?;
+                let inscription = extract_inscriptions(&top.args[0])?;
+                let expr = expression::FromTree::from_tree(&top.args[1])?;
                 Ok(Terminal::InscribePost(Arc::new(inscription), expr))
             }
             _ => Err(Error::Unexpected(format!(
@@ -688,15 +693,11 @@ where
 }
 
 fn extract_inscriptions(args: &expression::Tree<'_>) -> Result<Vec<Inscription>, Error> {
-    let inscription = expression::terminal(args, |x| -> Result<Vec<Inscription>, script::Error> {
-        let script = Script::from_hex(x).map_err(|e| script::Error::SerializationError)?;
-        let envelopes = Envelope::from_tapscript(&script, 0 /*Garbage Value OK */)?;
-        let parsed = envelopes.into_iter().map(ParsedEnvelope::from);
-
-        Ok(parsed.map(|i| i.payload).collect::<Vec<_>>())
+    expression::terminal(args, |x| {
+        let script = Script::from_hex(x)
+            .map_err(|error| Error::InscriptionError(error.to_string()))?;
+        crate::ord::parse_inscriptions(&script)
     })
-    .map_err(|e| Error::InscriptionError(e.to_string()))?;
-    Ok(inscription)
 }
 
 /// Helper trait to add a `push_astelem` method to `script::Builder`

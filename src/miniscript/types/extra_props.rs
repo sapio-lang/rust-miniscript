@@ -9,6 +9,7 @@ use super::{Error, ErrorKind, Property, ScriptContext};
 use script_num_size;
 use std::cmp;
 use std::iter::once;
+use std::sync::Arc;
 use MiniscriptKey;
 use Terminal;
 
@@ -1055,7 +1056,8 @@ impl Property for ExtData {
                 // Note that for CLTV this is a limitation not of Bitcoin but Miniscript. The
                 // number on the stack would be a 5 bytes signed integer but Miniscript's B type
                 // only consumes 4 bytes from the stack.
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -1064,7 +1066,8 @@ impl Property for ExtData {
                 Ok(Self::from_after(t))
             }
             Terminal::Older(t) => {
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -1141,11 +1144,60 @@ impl Property for ExtData {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
+            Terminal::InscribePre(ref i, ref c) => wrap_err(Self::inscribing(i, c.ext)),
+            Terminal::InscribePost(ref i, ref c) => {
+                wrap_err(Self::inscribing(i, c.ext)).map(|mut ext| {
+                    if !i.is_empty() {
+                        // ENDIF cannot be combined with a following VERIFY.
+                        ext.has_free_verify = false;
+                        // The temporary FALSE follows the child's result. A V
+                        // fragment leaves no result; all other bases may do so.
+                        let stack_growth = if c.ty.corr.base == super::Base::V {
+                            1
+                        } else {
+                            2
+                        };
+                        ext.exec_stack_elem_count_sat = c
+                            .ext
+                            .exec_stack_elem_count_sat
+                            .map(|count| cmp::max(count, stack_growth));
+                        ext.exec_stack_elem_count_dissat = c
+                            .ext
+                            .exec_stack_elem_count_dissat
+                            .map(|count| cmp::max(count, stack_growth));
+                    }
+                    ext
+                })
+            }
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()
         }
         ret
+    }
+
+    fn inscribing(
+        inscription: &Arc<Vec<crate::ord::Inscription>>,
+        mut r: Self,
+    ) -> Result<Self, ErrorKind> {
+        if inscription.is_empty() {
+            return Err(ErrorKind::InvalidInscription);
+        }
+        for item in inscription.iter() {
+            item.validate().map_err(|_| ErrorKind::InvalidInscription)?;
+        }
+        // Only IF and ENDIF count toward the legacy opcode limit. The
+        // canonical envelope contains only pushes in its unexecuted body.
+        let ops = 2 * inscription.len();
+        r.pk_cost += inscription.iter().map(|i| i.size_guess()).sum::<usize>();
+        r.ops_count_static += ops;
+        r.ops_count_sat = r.ops_count_sat.map(|count| count + ops);
+        r.ops_count_nsat = r.ops_count_nsat.map(|count| count + ops);
+        r.exec_stack_elem_count_sat = r.exec_stack_elem_count_sat.map(|count| cmp::max(count, 1));
+        r.exec_stack_elem_count_dissat = r
+            .exec_stack_elem_count_dissat
+            .map(|count| cmp::max(count, 1));
+        Ok(r)
     }
 }
 

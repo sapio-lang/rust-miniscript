@@ -21,6 +21,7 @@
 //! The format represents EC public keys abstractly to allow wallets to replace
 //! these with BIP32 paths, pay-to-contract instructions, etc.
 //!
+use bitcoin::hashes::hex::FromHex;
 use {error, fmt};
 
 #[cfg(feature = "compiler")]
@@ -29,6 +30,7 @@ pub mod concrete;
 pub mod semantic;
 
 use descriptor::Descriptor;
+use expression;
 use miniscript::{Miniscript, ScriptContext};
 use Terminal;
 
@@ -41,6 +43,21 @@ use MiniscriptKey;
 
 /// Policy entailment algorithm maximum number of terminals allowed
 const ENTAILMENT_MAX_TERMINALS: usize = 20;
+
+fn parse_inscription(arg: &expression::Tree) -> Result<Box<crate::ord::Inscription>, Error> {
+    expression::terminal(arg, |hex| {
+        let script =
+            bitcoin::Script::from_hex(hex).map_err(|e| Error::Unexpected(e.to_string()))?;
+        let mut inscriptions = crate::ord::parse_inscriptions(&script)?;
+        if inscriptions.len() != 1 {
+            return Err(Error::InscriptionError(
+                "expected exactly one inscription".into(),
+            ));
+        }
+        Ok(Box::new(inscriptions.pop().unwrap()))
+    })
+}
+
 /// Trait describing script representations which can be lifted into
 /// an abstract policy, by discarding information.
 /// After Lifting all policies are converted into `KeyHash(Pk::HasH)` to
@@ -122,7 +139,7 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Miniscript<Pk, Ctx>
 
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Terminal<Pk, Ctx> {
     fn lift(&self) -> Result<Semantic<Pk>, Error> {
-        let ret = match *self {
+        let policy = match *self {
             Terminal::PkK(ref pk) => Semantic::KeyHash(pk.to_pubkeyhash()),
             Terminal::PkH(ref pkh) => Semantic::KeyHash(pkh.clone()),
             Terminal::After(t) => Semantic::After(t),
@@ -168,8 +185,16 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Terminal<Pk, Ctx> {
                     .collect(),
             ),
             Terminal::TxTemplate(h) => Semantic::TxTemplate(h),
-        }
-        .normalized();
+            Terminal::InscribePre(ref i, ref s) | Terminal::InscribePost(ref i, ref s) => {
+                let mut result = s.lift()?;
+                // TODO: Inscription number semantic?
+                for insc in i.iter().rev() {
+                    result = Semantic::Inscribe(Box::new(insc.clone()), Box::new(result));
+                }
+                result
+            }
+        };
+        let ret = policy.normalized();
         Ok(ret)
     }
 }
@@ -222,6 +247,7 @@ impl<Pk: MiniscriptKey> Liftable<Pk> for Concrete<Pk> {
                 Semantic::Threshold(k, semantic_subs?)
             }
             Concrete::TxTemplate(h) => Semantic::TxTemplate(h),
+            Concrete::Inscribe(ref i, ref j) => Semantic::Inscribe(i.clone(), Box::new(j.lift()?)),
         }
         .normalized();
         Ok(ret)

@@ -20,7 +20,10 @@ pub mod correctness;
 pub mod extra_props;
 pub mod malleability;
 
+use std::sync::Arc;
 use std::{error, fmt};
+
+use crate::ord::Inscription;
 
 pub use self::correctness::{Base, Correctness, Input};
 pub use self::extra_props::ExtData;
@@ -40,6 +43,8 @@ fn return_none<T>(_: usize) -> Option<T> {
 pub enum ErrorKind {
     /// Relative or absolute timelock had an invalid time value (either 0, or >=0x80000000)
     InvalidTime,
+    /// An inscription wrapper has no envelope or contains an oversized push.
+    InvalidInscription,
     /// Passed a `z` argument to a `d` wrapper when `z` was expected
     NonZeroDupIf,
     /// Multisignature or threshold policy had a `k` value of 0
@@ -117,6 +122,11 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> error::Error for Error<Pk, Ctx> {
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Display for Error<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.error {
+            ErrorKind::InvalidInscription => write!(
+                f,
+                "fragment «{}» contains an invalid inscription envelope",
+                self.fragment,
+            ),
             ErrorKind::InvalidTime => write!(
                 f,
                 "fragment «{}» represents a timelock which value is invalid (time must be in [1; 0x80000000])",
@@ -371,6 +381,9 @@ pub trait Property: Sized {
         Self::and_or(left, right, Self::from_false())
     }
 
+    /// Computes the type of an `Inscription` fragment
+    fn inscribing(inscription: &Arc<Vec<Inscription>>, code: Self) -> Result<Self, ErrorKind>;
+
     /// Computes the type of an `OrB` fragment
     fn or_b(left: Self, right: Self) -> Result<Self, ErrorKind>;
 
@@ -443,7 +456,8 @@ pub trait Property: Sized {
                 // Note that for CLTV this is a limitation not of Bitcoin but Miniscript. The
                 // number on the stack would be a 5 bytes signed integer but Miniscript's B type
                 // only consumes 4 bytes from the stack.
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -452,7 +466,8 @@ pub trait Property: Sized {
                 Ok(Self::from_after(t))
             }
             Terminal::Older(t) => {
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // #380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -538,6 +553,11 @@ pub trait Property: Sized {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
+            Terminal::InscribePre(ref inscription, ref n)
+            | Terminal::InscribePost(ref inscription, ref n) => {
+                let child = get_child(&n.node, 0)?;
+                wrap_err(Self::inscribing(inscription, child))
+            }
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()
@@ -834,7 +854,8 @@ impl Property for Type {
                 // Note that for CLTV this is a limitation not of Bitcoin but Miniscript. The
                 // number on the stack would be a 5 bytes signed integer but Miniscript's B type
                 // only consumes 4 bytes from the stack.
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // # 380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -843,7 +864,8 @@ impl Property for Type {
                 Ok(Self::from_after(t))
             }
             Terminal::Older(t) => {
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) == 1 {
+                // # 380
+                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
                     return Err(Error {
                         fragment: fragment.clone(),
                         error: ErrorKind::InvalidTime,
@@ -920,10 +942,15 @@ impl Property for Type {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
+            Terminal::InscribePre(_, ref n) | Terminal::InscribePost(_, ref n) => Ok(n.ty.clone()),
         };
         if let Ok(ref ret) = ret {
             ret.sanity_checks()
         }
         ret
+    }
+
+    fn inscribing(inscription: &Arc<Vec<Inscription>>, code: Self) -> Result<Self, ErrorKind> {
+        Ok(code)
     }
 }

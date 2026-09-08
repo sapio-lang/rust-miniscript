@@ -1,9 +1,7 @@
-![Build](https://github.com/rust-bitcoin/rust-miniscript/workflows/Continuous%20integration/badge.svg)
+![Build](https://github.com/sapio-lang/rust-miniscript/actions/workflows/rust.yml/badge.svg)
 
-**Minimum Supported Rust Version:** 1.29.0
-
-*This crate uses "2015" edition and won't be ported over "2018" edition
-in the near future as this will change the MSRV to 1.31.*
+**Development and CI toolchain:** Rust 1.98.1, pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml) to match Sapio.
 
 # Miniscript
 
@@ -35,23 +33,63 @@ More information can be found in [the documentation](https://docs.rs/miniscript)
 or in [the `examples/` directory](https://github.com/apoelstra/rust-miniscript/tree/master/examples)
 
 
-## Minimum Supported Rust Version (MSRV)
-This library should always compile with any combination of features on **Rust 1.29**.
+## Building and continuous integration
 
-Because some dependencies have broken the build in minor/patch releases, to compile with 1.29.0 you will need to
-generate the lockfile and run the following version-pinning command:
-```
-cargo generate-lockfile --verbose
-cargo update -p cc --precise "1.0.41" --verbose
-```
+Use the pinned toolchain and committed lockfile:
 
-In order to use the `use-serde` feature or to build the unit tests with 1.29.0,
-the following version-pinning commands are also needed:
-```
-cargo update --package "serde" --precise "1.0.98"
-cargo update --package "serde_derive" --precise "1.0.98"
+```sh
+rustup show
+cargo test --locked --features compiler,use-serde,use-schemars,rand,trace
+cargo check --locked --lib --target wasm32-unknown-unknown \
+  --no-default-features --features compiler,use-serde,use-schemars
 ```
 
+CI runs native tests and examples on Linux and macOS, tests the default build
+and each of `compiler`, `use-serde`, `use-schemars`, and `rand` separately on
+Linux, and checks Clippy, documentation, and the WASM library. The WASM check
+uses Sapio's guest features; `rand` requires a host randomness source and is
+covered by the native tests. WASM compilation requires a C compiler with a
+WASM backend, selected with `CC_wasm32_unknown_unknown=clang` in CI.
+
+The `unstable` feature enables nightly-only benchmarks, so it is excluded
+from stable test commands. Older Rust versions are no longer tested; the
+historical Rust 1.29 MSRV claim is not maintained by this fork.
+
+The historical fuzz and live-node suites remain in `fuzz/` and
+`integration_test/`, but are not part of this CI baseline. Their manifests
+still refer to the upstream `miniscript` package name, and the integration
+runner targets Bitcoin Core 22 with a missing checksum file. Restoring those
+suites requires a separate update; passing native tests does not establish
+fuzzing or live-node coverage. Formatting normalization is also a separate
+task before a repository-wide formatting gate can be restored.
+
+
+## CTV hashing and finalization
+
+The CTV hash implementation is tested against all 400 expected hashes in the
+official BIP-119 corpus. When any input has a scriptSig, the commitment includes
+every input's serialized scriptSig, including empty ones.
+
+Whole-transaction PSBT finalization establishes scriptSigs before satisfying
+native witness inputs, then verifies the complete result. Regression tests cover
+native WSH and Taproot CTV alongside a legacy input in either position, with both
+fixed final scriptSigs and supplied signatures. Candidate satisfactions include
+their own scriptSig in interpreter checks. The finalizer also validates PSBT
+structure and enforces explicitly requested sighash types.
+
+Single-input finalization checks the currently known scriptSigs. A later input
+can change that commitment; use `PsbtExt::extract` or `interpreter_check` to
+verify the complete transaction. Automatic ordering does not solve circular
+P2SH CTV commitments or extend the set of accepted bare descriptors. Script
+verification uses supplied prevouts; callers must authenticate funding data.
+
+## Inscription support
+
+The inscription extension supports canonical envelopes from its existing field
+model. Script and policy parsing preserve committed bytes; unsupported encodings
+return errors. Tests cover parsing, resource and key analysis, witness extraction,
+and signed Taproot reveals. See the [correctness review](docs/INSCRIPTIONS.md)
+for the repaired defects, source references, and supported domain.
 
 ## Contributing
 Contributions are generally welcome. If you intend to make larger changes please

@@ -63,7 +63,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
             | Terminal::DupIf(ref node)
             | Terminal::Verify(ref node)
             | Terminal::NonZero(ref node)
-            | Terminal::ZeroNotEqual(ref node) => vec![node],
+            | Terminal::ZeroNotEqual(ref node)
+            | Terminal::InscribePre(_, ref node)
+            | Terminal::InscribePost(_, ref node) => vec![node],
 
             Terminal::AndV(ref node1, ref node2)
             | Terminal::AndB(ref node1, ref node2)
@@ -90,6 +92,8 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
             | (0, &Terminal::Verify(ref node))
             | (0, &Terminal::NonZero(ref node))
             | (0, &Terminal::ZeroNotEqual(ref node))
+            | (0, &Terminal::InscribePre(_, ref node))
+            | (0, &Terminal::InscribePost(_, ref node))
             | (0, &Terminal::AndV(ref node, _))
             | (0, &Terminal::AndB(ref node, _))
             | (0, &Terminal::OrB(ref node, _))
@@ -435,8 +439,7 @@ impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iterator for PkPkhIter<'a, Pk, C
     }
 }
 
-// Module is public since it export testcase generation which may be used in
-// dependent libraries for their own tasts based on Miniscript AST
+/// Shared Miniscript AST fixtures for iterator tests.
 #[cfg(test)]
 pub mod test {
     use super::{Miniscript, PkPkh};
@@ -445,6 +448,7 @@ pub mod test {
     use bitcoin::secp256k1;
     use miniscript::context::Segwitv0;
 
+    /// A miniscript, its keys and key hashes, and whether its root contains a key.
     pub type TestData = (
         Miniscript<bitcoin::PublicKey, Segwitv0>,
         Vec<bitcoin::PublicKey>,
@@ -452,6 +456,7 @@ pub mod test {
         bool, // Indicates that the top-level contains public key or hashes
     );
 
+    /// Generate deterministic public keys from consecutive test secret keys.
     pub fn gen_secp_pubkeys(n: usize) -> Vec<secp256k1::PublicKey> {
         let mut ret = Vec::with_capacity(n);
         let secp = secp256k1::Secp256k1::new();
@@ -470,6 +475,7 @@ pub mod test {
         ret
     }
 
+    /// Generate deterministic Bitcoin public keys with the requested encoding.
     pub fn gen_bitcoin_pubkeys(n: usize, compressed: bool) -> Vec<bitcoin::PublicKey> {
         gen_secp_pubkeys(n)
             .into_iter()
@@ -477,6 +483,7 @@ pub mod test {
             .collect()
     }
 
+    /// Generate miniscript fixtures and their expected iterator results.
     pub fn gen_testcases() -> Vec<TestData> {
         let k = gen_bitcoin_pubkeys(10, true);
         let h: Vec<hash160::Hash> = k

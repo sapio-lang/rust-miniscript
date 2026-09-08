@@ -104,12 +104,21 @@ pub(super) fn get_scriptpubkey(psbt: &Psbt, index: usize) -> Result<&Script, Inp
 
 // Get the spending utxo for this psbt input
 pub(super) fn get_utxo(psbt: &Psbt, index: usize) -> Result<&bitcoin::TxOut, InputError> {
-    let inp = &psbt.inputs[index];
+    let inp = psbt.inputs.get(index).ok_or(InputError::MissingInput)?;
     let utxo = if let Some(ref witness_utxo) = inp.witness_utxo {
         &witness_utxo
     } else if let Some(ref non_witness_utxo) = inp.non_witness_utxo {
-        let vout = psbt.unsigned_tx.input[index].previous_output.vout;
-        &non_witness_utxo.output[vout as usize]
+        let vout = psbt
+            .unsigned_tx
+            .input
+            .get(index)
+            .ok_or(InputError::MissingInput)?
+            .previous_output
+            .vout;
+        non_witness_utxo
+            .output
+            .get(vout as usize)
+            .ok_or(InputError::NonWitnessUtxoOutOfBounds(vout))?
     } else {
         return Err(InputError::MissingUtxo);
     };
@@ -278,6 +287,7 @@ pub fn interpreter_check<C: secp256k1::Verification>(
     psbt: &Psbt,
     secp: &Secp256k1<C>,
 ) -> Result<(), Error> {
+    sanity_check(psbt)?;
     let utxos = prevouts(&psbt)?;
     let utxos = &Prevouts::All(&utxos);
     for (index, input) in psbt.inputs.iter().enumerate() {
@@ -311,19 +321,42 @@ fn interpreter_inp_check<C: secp256k1::Verification, T: Borrow<TxOut>>(
     {
         let cltv = psbt.unsigned_tx.lock_time;
         let csv = psbt.unsigned_tx.input[index].sequence;
+        // CTV commits to every final scriptSig, including the candidate being
+        // checked before finalize_input installs it in the PSBT.
+        let mut candidate = psbt.unsigned_tx.clone();
+        for (input, metadata) in candidate.input.iter_mut().zip(&psbt.inputs) {
+            if let Some(ref final_script_sig) = metadata.final_script_sig {
+                input.script_sig = final_script_sig.clone();
+            }
+        }
+        candidate.input[index].script_sig = script_sig.clone();
         let interpreter = interpreter::Interpreter::from_txdata(
             spk,
             &script_sig,
             &witness,
             cltv,
             csv,
-            super::get_ctv_hash(&psbt.unsigned_tx, index as u32),
+            super::get_ctv_hash(&candidate, index as u32),
         )
         .map_err(|e| Error::InputError(InputError::Interpreter(e), index))?;
         let iter = interpreter.iter(secp, &psbt.unsigned_tx, index, &utxos);
-        if let Some(error) = iter.filter_map(Result::err).next() {
-            return Err(Error::InputError(InputError::Interpreter(error), index));
-        };
+        for constraint in iter {
+            let constraint = constraint
+                .map_err(|error| Error::InputError(InputError::Interpreter(error), index))?;
+            // Finalized inputs may no longer have partial signature maps.
+            // Enforce their declaration against signatures the script executes.
+            let key_sig = match constraint {
+                interpreter::SatisfiedConstraint::PublicKey { key_sig }
+                | interpreter::SatisfiedConstraint::PublicKeyHash { key_sig, .. } => key_sig,
+                _ => continue,
+            };
+            let flag = match key_sig {
+                interpreter::KeySigPair::Ecdsa(_, signature) => signature.hash_ty as u32,
+                interpreter::KeySigPair::Schnorr(_, signature) => signature.hash_ty as u32,
+            };
+            super::check_sighash_type(psbt.inputs[index].sighash_type, flag)
+                .map_err(|error| Error::InputError(error, index))?;
+        }
     }
     Ok(())
 }
@@ -337,7 +370,7 @@ fn interpreter_inp_check<C: secp256k1::Verification, T: Borrow<TxOut>>(
 /// finalized psbt which involves checking the signatures/ preimages/timelocks.
 /// The functions fails it is not possible to satisfy any of the inputs non-malleably
 /// See [finalize_mall] if you want to allow malleable satisfactions
-#[deprecated(since = "7.0", note = "Please use PsbtExt::finalize instead")]
+#[deprecated(since = "7.0.0", note = "Please use PsbtExt::finalize instead")]
 pub fn finalize<C: secp256k1::Verification>(
     psbt: &mut Psbt,
     secp: &Secp256k1<C>,
@@ -358,14 +391,49 @@ pub fn finalize_helper<C: secp256k1::Verification>(
     secp: &Secp256k1<C>,
     allow_mall: bool,
 ) -> Result<(), super::Error> {
-    sanity_check(psbt)?;
+    finalize_all(psbt, secp, allow_mall).map_err(|errors| {
+        errors
+            .into_iter()
+            .next()
+            .expect("failed finalization has an error")
+    })
+}
 
-    // Actually construct the witnesses
-    for index in 0..psbt.inputs.len() {
-        finalize_input(psbt, index, secp, allow_mall)?;
+// Establish scriptSigs before satisfying native witness covenants. Mutations
+// remain partial on error; success also requires the complete final transaction
+// to satisfy every input, since another input can change a CTV commitment.
+pub(super) fn finalize_all<C: secp256k1::Verification>(
+    psbt: &mut Psbt,
+    secp: &Secp256k1<C>,
+    allow_mall: bool,
+) -> Result<(), Vec<Error>> {
+    sanity_check(psbt).map_err(|error| vec![error])?;
+    let mut errors = vec![];
+    for native_witness_pass in [false, true].iter().copied() {
+        for index in 0..psbt.inputs.len() {
+            let native_witness = match get_scriptpubkey(psbt, index) {
+                Ok(script) => {
+                    script.is_v0_p2wpkh() || script.is_v0_p2wsh() || script.is_v1_p2tr()
+                }
+                Err(error) => {
+                    if !native_witness_pass {
+                        errors.push(Error::InputError(error, index));
+                    }
+                    continue;
+                }
+            };
+            if native_witness == native_witness_pass {
+                if let Err(error) = finalize_input(psbt, index, secp, allow_mall) {
+                    errors.push(error);
+                }
+            }
+        }
     }
-    // Interpreter is already run inside finalize_input for each input
-    Ok(())
+    if errors.is_empty() {
+        interpreter_check(psbt, secp).map_err(|error| vec![error])
+    } else {
+        Err(errors)
+    }
 }
 
 // Helper function to obtain psbt final_witness/final_script_sig.
@@ -376,6 +444,14 @@ fn finalize_input_helper<C: secp256k1::Verification>(
     secp: &Secp256k1<C>,
     allow_mall: bool,
 ) -> Result<(Witness, Script), super::Error> {
+    let input = &psbt.inputs[index];
+    if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
+        let witness = input.final_script_witness.clone().unwrap_or_default();
+        let script_sig = input.final_script_sig.clone().unwrap_or_default();
+        let utxos = prevouts(psbt)?;
+        interpreter_inp_check(psbt, secp, index, &Prevouts::All(&utxos), &witness, &script_sig)?;
+        return Ok((witness, script_sig));
+    }
     let (witness, script_sig) = {
         let spk = get_scriptpubkey(psbt, index).map_err(|e| Error::InputError(e, index))?;
         let sat = PsbtInputSatisfier::new(&psbt, index);

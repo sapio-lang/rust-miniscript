@@ -14,6 +14,8 @@
 
 //! Correctness/Soundness type properties
 
+use std::sync::Arc;
+
 use super::{ErrorKind, Property};
 
 /// Basic type representing where the fragment can go
@@ -522,5 +524,9 @@ impl Property for Correctness {
             dissatisfiable: true,
             unit: true,
         })
+    }
+
+    fn inscribing(inscription: &Arc<Vec<crate::ord::Inscription>>, code: Self) -> Result<Self, ErrorKind> {
+        Ok(code)
     }
 }

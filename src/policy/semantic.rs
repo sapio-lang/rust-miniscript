@@ -20,6 +20,8 @@ use std::{fmt, str};
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d};
 
+use crate::ord::Inscription;
+
 use super::concrete::PolicyError;
 use errstr;
 use Error;
@@ -57,6 +59,8 @@ pub enum Policy<Pk: MiniscriptKey> {
     Threshold(usize, Vec<Policy<Pk>>),
     /// A SHA256 whose must match the tx template
     TxTemplate(sha256::Hash),
+    /// Add an Inscription
+    Inscribe(Box<Inscription>, Box<Policy<Pk>>),
 }
 
 impl<Pk: MiniscriptKey> ForEachKey<Pk> for Policy<Pk> {
@@ -84,8 +88,11 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Hash160(..)
             | Policy::After(..)
             | Policy::Older(..) => true,
-            | Policy::TxTemplate(..) => true,
-            Policy::Threshold(_, ref subs) => subs.iter().all(|sub| sub.real_for_each_key(&mut *pred)),
+            Policy::TxTemplate(..) => true,
+            Policy::Threshold(_, ref subs) => {
+                subs.iter().all(|sub| sub.real_for_each_key(&mut *pred))
+            }
+            Policy::Inscribe(_, ref j) => j.real_for_each_key(pred),
         }
     }
 
@@ -142,6 +149,10 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 new_subs.map(|ok| Policy::Threshold(k, ok))
             }
             Policy::TxTemplate(ref h) => Ok(Policy::TxTemplate(h.clone())),
+            Policy::Inscribe(ref i, ref j) => Ok(Policy::Inscribe(
+                i.clone(),
+                Box::new(j._translate_pkh(translatefpkh)?),
+            )),
         }
     }
 
@@ -149,10 +160,15 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// A |- B means every satisfaction of A is also a satisfaction of B.
     /// This implementation will run slow for larger policies but should be sufficient for
     /// most practical policies.
+    /// Returns an error if either policy contains inscription effects, which
+    /// this spending-condition algorithm cannot represent.
 
     // This algorithm has a naive implementation. It is possible to optimize this
     // by memoizing and maintaining a hashmap.
     pub fn entails(self, other: Policy<Pk>) -> Result<bool, PolicyError> {
+        if self.contains_inscription() || other.contains_inscription() {
+            return Err(PolicyError::InscriptionEntailmentUnsupported);
+        }
         if self.n_terminals() > ENTAILMENT_MAX_TERMINALS {
             return Err(PolicyError::EntailmentMaxTerminals);
         }
@@ -174,6 +190,14 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 );
                 Ok(Policy::entails(a1, b1)? && Policy::entails(a2, b2)?)
             }
+        }
+    }
+
+    fn contains_inscription(&self) -> bool {
+        match *self {
+            Policy::Inscribe(..) => true,
+            Policy::Threshold(_, ref subs) => subs.iter().any(Policy::contains_inscription),
+            _ => false,
         }
     }
 
@@ -260,6 +284,9 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
                 f.write_str(")")
             }
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref j) => {
+                write!(f, "inscribe({:?}, {:?})", i, j)
+            }
         }
     }
 }
@@ -294,6 +321,9 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
                 f.write_str(")")
             }
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref j) => {
+                write!(f, "inscribe({},{})", i, j)
+            }
         }
     }
 }
@@ -403,6 +433,10 @@ where
             ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
                 sha256::Hash::from_hex(x).map(Policy::TxTemplate)
             }),
+            ("inscribe", 2) => Ok(Policy::Inscribe(
+                super::parse_inscription(&top.args[0])?,
+                Box::new(Policy::from_tree(&top.args[1])?),
+            )),
 
             _ => Err(errstr(top.name)),
         }
@@ -414,6 +448,10 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// `Unsatisfiable`s. Does not reorder any branches; use `.sort`.
     pub fn normalized(self) -> Policy<Pk> {
         match self {
+            Policy::Inscribe(inscription, sub) => match sub.normalized() {
+                Policy::Unsatisfiable => Policy::Unsatisfiable,
+                child => Policy::Inscribe(inscription, Box::new(child)),
+            },
             Policy::Threshold(k, subs) => {
                 let mut ret_subs = Vec::with_capacity(subs.len());
 
@@ -504,6 +542,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 acc.extend(x.real_relative_timelocks());
                 acc
             }),
+            Policy::Inscribe(_, ref subs) => subs.real_relative_timelocks(),
         }
     }
 
@@ -533,6 +572,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 acc.extend(x.real_absolute_timelocks());
                 acc
             }),
+            Policy::Inscribe(_, ref subs) => subs.real_absolute_timelocks(),
         }
     }
 
@@ -549,6 +589,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// that are not satisfied at the given age.
     pub fn at_age(mut self, time: u32) -> Policy<Pk> {
         self = match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.at_age(time)))
+            }
             Policy::Older(t) => {
                 if t > time {
                     Policy::Unsatisfiable
@@ -568,6 +611,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// that are not satisfied at the given age.
     pub fn at_height(mut self, time: u32) -> Policy<Pk> {
         self = match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.at_height(time)))
+            }
             Policy::After(t) => {
                 if t > time {
                     Policy::Unsatisfiable
@@ -597,6 +643,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             | Policy::Hash160(..)
             | Policy::TxTemplate(..) => 0,
             Policy::Threshold(_, ref subs) => subs.iter().map(|sub| sub.n_keys()).sum::<usize>(),
+            Policy::Inscribe(_, ref subs) => subs.n_keys(),
         }
     }
 
@@ -626,6 +673,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     Some(sublens[0..k].iter().cloned().sum::<usize>())
                 }
             }
+            Policy::Inscribe(_, ref subs) => subs.minimum_n_keys(),
         }
     }
 }
@@ -637,6 +685,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// implemented.
     pub fn sorted(self) -> Policy<Pk> {
         match self {
+            Policy::Inscribe(inscription, sub) => {
+                Policy::Inscribe(inscription, Box::new(sub.sorted()))
+            }
             Policy::Threshold(k, subs) => {
                 let mut new_subs: Vec<_> = subs.into_iter().map(Policy::sorted).collect();
                 new_subs.sort();
@@ -678,8 +729,8 @@ mod tests {
     fn semantic_analysis() {
         let policy = StringPolicy::from_str("pkh()").unwrap();
         assert_eq!(policy, Policy::KeyHash("".to_owned()));
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(0), policy.clone());
         assert_eq!(policy.clone().at_age(10000), policy.clone());
         assert_eq!(policy.n_keys(), 1);
@@ -687,7 +738,7 @@ mod tests {
 
         let policy = StringPolicy::from_str("older(1000)").unwrap();
         assert_eq!(policy, Policy::Older(1000));
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.relative_timelocks(), vec![1000]);
         assert_eq!(policy.clone().at_age(0), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_age(999), Policy::Unsatisfiable);
@@ -705,7 +756,7 @@ mod tests {
             )
         );
         assert_eq!(policy.relative_timelocks(), vec![1000]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(0), Policy::KeyHash("".to_owned()));
         assert_eq!(policy.clone().at_age(999), Policy::KeyHash("".to_owned()));
         assert_eq!(policy.clone().at_age(1000), policy.clone().normalized());
@@ -721,8 +772,8 @@ mod tests {
                 vec![Policy::KeyHash("".to_owned()), Policy::Unsatisfiable,]
             )
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), Some(1));
 
@@ -734,8 +785,8 @@ mod tests {
                 vec![Policy::KeyHash("".to_owned()), Policy::Unsatisfiable,]
             )
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), None);
 
@@ -792,7 +843,7 @@ mod tests {
         let policy = StringPolicy::from_str("after(1000)").unwrap();
         assert_eq!(policy, Policy::After(1000));
         assert_eq!(policy.absolute_timelocks(), vec![1000]);
-        assert_eq!(policy.relative_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
         assert_eq!(policy.clone().at_height(0), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_height(999), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_height(1000), policy.clone());
@@ -884,7 +935,10 @@ mod tests {
         let liquid_pol = StringPolicy::from_str(
             "or(and(older(4096),thresh(2,pkh(A),pkh(B),pkh(C))),thresh(11,pkh(F1),pkh(F2),pkh(F3),pkh(F4),pkh(F5),pkh(F6),pkh(F7),pkh(F8),pkh(F9),pkh(F10),pkh(F11),pkh(F12),pkh(F13),pkh(F14)))").unwrap();
         let mut count = 0;
-        assert!(liquid_pol.for_each_key(|_| { count +=1; true }));
+        assert!(liquid_pol.for_each_key(|_| {
+            count += 1;
+            true
+        }));
         assert_eq!(count, 17);
     }
 }

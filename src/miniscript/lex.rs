@@ -17,14 +17,22 @@
 //! Translates a script into a reversed sequence of tokens
 //!
 
-use bitcoin::blockdata::{opcodes, script};
+use bitcoin::{
+    blockdata::{
+        opcodes::{self, all::OP_ENDIF},
+        script::{self, Instruction},
+    },
+    Script,
+};
 
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+use crate::ord;
 
 use super::Error;
 
 /// Atom of a tokenized version of a script
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum Token<'s> {
     BoolAnd,
@@ -60,16 +68,21 @@ pub enum Token<'s> {
     Bytes32(&'s [u8]),
     Bytes33(&'s [u8]),
     Bytes65(&'s [u8]),
+    Inscription(Arc<Script>),
 }
 
 impl<'s> fmt::Display for Token<'s> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self.clone() {
             Token::Num(n) => write!(f, "#{}", n),
             Token::Hash20(b) | Token::Bytes33(b) | Token::Bytes32(b) | Token::Bytes65(b) => {
                 for ch in &b[..] {
                     write!(f, "{:02x}", *ch)?;
                 }
+                Ok(())
+            }
+            Token::Inscription(ref ins) => {
+                write!(f, "Inscribe({})", ins.asm())?;
                 Ok(())
             }
             x => write!(f, "{:?}", x),
@@ -113,12 +126,45 @@ impl<'s> Iterator for TokenIter<'s> {
     }
 }
 
+// The Bitcoin instruction iterator has already checked the encoded length.
+fn instruction_size(opcode: u8, instruction: &Instruction) -> usize {
+    match instruction {
+        Instruction::Op(_) => 1,
+        Instruction::PushBytes(bytes) => {
+            bytes.len()
+                + match opcode {
+                    0x4c => 2,
+                    0x4d => 3,
+                    0x4e => 5,
+                    _ => 1,
+                }
+        }
+    }
+}
+
 /// Tokenize a script
 pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
     let mut ret = Vec::with_capacity(script.len());
 
-    for ins in script.instructions_minimal() {
-        match ins.map_err(Error::Script)? {
+    let mut it = script.instructions();
+    let mut position = 0;
+    while let Some(ins) = it.next() {
+        let instruction = ins.map_err(Error::Script)?;
+        let start = position;
+        let opcode = script[start];
+        position += instruction_size(opcode, &instruction);
+        if let Instruction::PushBytes(bytes) = instruction {
+            // Executed Miniscript retains the same minimal-push rule as the
+            // Bitcoin iterator. Inscription data is scanned separately below.
+            if (opcode == 0x4c && bytes.len() < 76)
+                || (opcode == 0x4d && bytes.len() < 0x100)
+                || (opcode == 0x4e && bytes.len() < 0x10000)
+                || (bytes.len() == 1 && (bytes[0] == 0x81 || (1..=16).contains(&bytes[0])))
+            {
+                return Err(Error::Script(script::Error::NonMinimalPush));
+            }
+        }
+        match instruction {
             script::Instruction::Op(opcodes::all::OP_BOOLAND) => {
                 ret.push(Token::BoolAnd);
             }
@@ -182,7 +228,51 @@ pub fn lex<'s>(script: &'s script::Script) -> Result<Vec<Token<'s>>, Error> {
                 ret.push(Token::Add);
             }
             script::Instruction::Op(opcodes::all::OP_IF) => {
-                ret.push(Token::If);
+                if ret.last() == Some(&Token::Num(0)) {
+                    ret.pop();
+                    let protocol = it
+                        .next()
+                        .ok_or_else(|| {
+                            Error::InscriptionError("Missing inscription protocol".into())
+                        })?
+                        .map_err(Error::Script)?;
+                    position += instruction_size(script[position], &protocol);
+                    if protocol != Instruction::PushBytes(ord::PROTOCOL_ID) {
+                        return Err(Error::InscriptionError(
+                            "Unknown inscription protocol".into(),
+                        ));
+                    }
+                    loop {
+                        let instruction = it
+                            .next()
+                            .ok_or_else(|| {
+                                Error::InscriptionError("Missing inscription ENDIF".into())
+                            })?
+                            .map_err(Error::Script)?;
+                        position += instruction_size(script[position], &instruction);
+                        match instruction {
+                            Instruction::Op(OP_ENDIF) => break,
+                            Instruction::PushBytes(_) => {}
+                            Instruction::Op(opcode)
+                                if matches!(
+                                    opcode.classify(opcodes::ClassifyContext::TapScript),
+                                    opcodes::Class::PushNum(_)
+                                ) => {}
+                            _ => {
+                                return Err(Error::InscriptionError(
+                                    "Inscription must be push-only".into(),
+                                ))
+                            }
+                        }
+                    }
+                    // Minimal numeric pushes ensure the preceding Num(0) is
+                    // exactly one OP_0 byte. Keep original envelope pushes:
+                    // reconstruction could change the Taproot commitment.
+                    let envelope = Script::from(script[start - 1..position].to_vec());
+                    ret.push(Token::Inscription(Arc::new(envelope)));
+                } else {
+                    ret.push(Token::If);
+                }
             }
             script::Instruction::Op(opcodes::all::OP_IFDUP) => {
                 ret.push(Token::IfDup);

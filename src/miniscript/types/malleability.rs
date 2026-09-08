@@ -14,6 +14,8 @@
 
 //! Malleability-related Type properties
 
+use std::sync::Arc;
+
 use super::{ErrorKind, Property};
 
 /// Whether the fragment has a dissatisfaction, and if so, whether
@@ -333,5 +335,9 @@ impl Property for Malleability {
             safe: safe_count > n - k,
             non_malleable: all_are_non_malleable && safe_count >= n - k && all_are_dissat_unique,
         })
+    }
+
+    fn inscribing(inscription: &Arc<Vec<crate::ord::Inscription>>, code: Self) -> Result<Self, ErrorKind> {
+        Ok(code)
     }
 }

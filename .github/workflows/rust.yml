@@ -1,97 +1,85 @@
-on: [push, pull_request]
-
 name: Continuous integration
 
+on:
+  push:
+    branches: [master, inscribor]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # `unstable` enables nightly-only benchmark tests.
+  STABLE_FEATURES: compiler,use-serde,use-schemars,rand,trace
+
 jobs:
-  lint_fuzz_stable:
-    name: Lint + Fuzz
-    runs-on: ubuntu-latest
+  test:
+    name: Tests (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
-        rust:
-          - 1.58.0
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout Crate
-        uses: actions/checkout@v2
-      - name: Install hongfuzz dependancies
-        run: sudo apt install build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev
-      - name: Checkout Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - name: Running fuzzer
-        env:
-          DO_FUZZ: true
-          DO_LINT: true
-        run: ./contrib/test.sh
-
-  bench_nightly:
-    name: Bench + Tests
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - nightly
-    steps:
-      - name: Checkout Crate
-        uses: actions/checkout@v2
-      - name: Checkout Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - name: Running cargo test
-        env:
-          DO_BENCH: true
-        run: ./contrib/test.sh
-
-  UnitTests:
-    name: Tests
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - 1.29.0
-          - beta
-    steps:
-      - name: Checkout Crate
-        uses: actions/checkout@v2
-      - name: Checkout Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - name: Pin deps if rust 1.29
-        if: matrix.rust == '1.29.0'
+      - uses: actions/checkout@v7
+      - name: Install the pinned toolchain
+        run: rustup show
+      - run: cargo test --locked --features "$STABLE_FEATURES"
+      - name: Run examples
         run: |
-            cargo generate-lockfile --verbose && \
-            cargo update --verbose --package "cc" --precise "1.0.41" && \
-            cargo update --verbose --package "serde" --precise "1.0.98" && \
-            cargo update --verbose --package "serde_derive" --precise "1.0.98"
-      - name: Running cargo
-        run: ./contrib/test.sh
+          for example in htlc parse sign_multisig verify_tx psbt xpub_descriptors; do
+            cargo run --locked --features "$STABLE_FEATURES" --example "$example"
+          done
 
-  AllTests:
-    name: Unit + Int tests
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
+  features:
+    name: Feature coverage and documentation
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout Crate
-        uses: actions/checkout@v2
-      - name: Checkout Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - name: Running cargo
-        env:
-          BITCOINVERSION: '22.0'
-        run: ./contrib/test.sh
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - run: cargo test --locked --no-default-features
+      - name: Test each optional feature separately
+        run: |
+          for feature in compiler use-serde use-schemars rand; do
+            cargo test --locked --no-default-features --features "$feature"
+          done
+      - run: cargo clippy --locked --all-targets --features "$STABLE_FEATURES"
+      - run: cargo doc --locked --no-deps --features "$STABLE_FEATURES"
+
+  wasm:
+    name: WASM library
+    runs-on: ubuntu-24.04
+    env:
+      CC_wasm32_unknown_unknown: clang
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - name: Check the Sapio guest feature set
+        run: >-
+          cargo check --locked --lib --target wasm32-unknown-unknown
+          --no-default-features --features compiler,use-serde,use-schemars
+
+  inscriptions:
+    name: Inscription reveals against Bitcoin Core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - name: Install pinned Bitcoin Core
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/bitcoin.tar.gz" \
+            https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz
+          echo "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e  $RUNNER_TEMP/bitcoin.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/bitcoin.tar.gz" -C "$RUNNER_TEMP"
+      - run: cargo build --locked --example inscription_node_fixture
+      - name: Validate generated reveals with Core
+        run: >-
+          python3 contrib/check_inscriptions.py
+          --bitcoind "$RUNNER_TEMP/bitcoin-31.1/bin/bitcoind"
+          --fixture target/debug/examples/inscription_node_fixture

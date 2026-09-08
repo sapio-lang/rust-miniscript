@@ -1250,6 +1250,9 @@ impl Satisfaction {
                 },
                 has_sig: true,
             },
+            Terminal::InscribePre(_, ref n) | Terminal::InscribePost(_, ref n) => {
+                Self::satisfy_helper(&n.node, stfr, root_has_sig, leaf_hash, min_fn, thresh_fn)
+            }
         }
     }
 
@@ -1424,6 +1427,9 @@ impl Satisfaction {
                 stack: Witness::Impossible,
                 has_sig: false,
             },
+            Terminal::InscribePre(_, ref n) | Terminal::InscribePost(_, ref n) => {
+                Self::dissatisfy_helper(&n.node, stfr, root_has_sig, leaf_hash, min_fn, thresh_fn)
+            }
         }
     }
 

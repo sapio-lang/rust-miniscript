@@ -36,10 +36,16 @@ type PolicyCache<Pk, Ctx> =
     BTreeMap<(Concrete<Pk>, OrdF64, Option<OrdF64>), BTreeMap<CompilationKey, AstElemExt<Pk, Ctx>>>;
 
 ///Ordered f64 for comparison
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 struct OrdF64(f64);
 
 impl Eq for OrdF64 {}
+impl PartialOrd for OrdF64 {
+    fn partial_cmp(&self, other: &OrdF64) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Ord for OrdF64 {
     fn cmp(&self, other: &OrdF64) -> cmp::Ordering {
         // will panic if given NaN
@@ -92,7 +98,9 @@ impl From<policy::concrete::PolicyError> for CompilerError {
 /// Hash required for using OrdF64 as key for hashmap
 impl hash::Hash for OrdF64 {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
+        // Floating-point equality treats positive and negative zero as equal.
+        let bits = if self.0 == 0.0 { 0 } else { self.0.to_bits() };
+        bits.hash(state);
     }
 }
 
@@ -197,6 +205,12 @@ impl Property for CompilerExtData {
             sat_cost: 33.0,
             dissat_cost: Some(33.0),
         }
+    }
+    fn inscribing(
+        inscription: &Arc<Vec<crate::ord::Inscription>>,
+        code: Self,
+    ) -> Result<Self, ErrorKind> {
+        Ok(code)
     }
 
     fn from_time(_t: u32) -> Self {
@@ -815,6 +829,23 @@ where
     }
 
     match *policy {
+        Concrete::Inscribe(ref inscription, ref sub) => {
+            let subcomp = best_compilations(policy_cache, &sub, sat_prob, dissat_prob)?;
+            for (_, child) in subcomp {
+                let ast =
+                    Terminal::InscribePre(Arc::new(vec![inscription.as_ref().clone()]), child.ms);
+                // The envelope adds no witness cost. Preserve the compiled
+                // child's costs: recursive recomputation loses the branch
+                // probabilities used to compile its internal disjunctions.
+                insert_wrap!(AstElemExt {
+                    ms: Arc::new(
+                        Miniscript::from_ast(ast)
+                            .expect("validated inscription preserves the compiled child's type")
+                    ),
+                    comp_ext_data: child.comp_ext_data,
+                });
+            }
+        }
         Concrete::Unsatisfiable => {
             insert_wrap!(AstElemExt::terminal(Terminal::False));
         }
@@ -1184,6 +1215,22 @@ mod tests {
     type BPolicy = Concrete<bitcoin::PublicKey>;
     type DummyTapAstElemExt = policy::compiler::AstElemExt<String, Tap>;
     type SegwitMiniScript = Miniscript<bitcoin::PublicKey, Segwitv0>;
+
+    #[test]
+    fn ordered_float_signed_zeros_hash_equally() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let positive_zero = OrdF64(0.0);
+        let negative_zero = OrdF64(-0.0);
+        assert_eq!(positive_zero, negative_zero);
+
+        let mut positive_hash = DefaultHasher::new();
+        let mut negative_hash = DefaultHasher::new();
+        positive_zero.hash(&mut positive_hash);
+        negative_zero.hash(&mut negative_hash);
+        assert_eq!(positive_hash.finish(), negative_hash.finish());
+    }
 
     fn pubkeys_and_a_sig(n: usize) -> (Vec<bitcoin::PublicKey>, secp256k1::ecdsa::Signature) {
         let mut ret = Vec::with_capacity(n);

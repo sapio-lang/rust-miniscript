@@ -29,10 +29,12 @@ a Miniscript parser must preserve every committed script byte.
 | Field encoding | Empty metadata disappeared, and unchunked fields could exceed 520 bytes. Empty metadata is retained; AST/policy validation rejects oversized fields. Body and metadata remain chunked. |
 | Resource analysis | Multiple envelopes undercounted legacy opcodes; postfix VERIFY and stack use were underestimated; impossible paths became possible in metadata. Bounds now include each envelope and preserve impossible paths. |
 | Keys and policies | Wrappers hid repeated keys and malformed children. Traversal and validation recurse; semantic filtering/sorting preserve reachable inscription metadata. Entailment explicitly rejects unsupported inscription effects. |
+| Policy compilation | Wrapping compiled children recomputed their costs without branch probabilities and panicked, including for a single owner key. Wrappers now retain the child's compiled witness costs while accounting for their script bytes. |
 | Spending | The interpreter could not evaluate inscription nodes. It now evaluates their wrapped condition. Real Schnorr tests finalize Taproot reveals and reject invalid signatures before and after finalization. |
 
 The regressions are in `tests/inscription_envelopes.rs`,
-`tests/inscription_parsing.rs`, and `tests/inscription_analysis.rs`. Defect tests
+`tests/inscription_parsing.rs`, `tests/inscription_analysis.rs`, and
+`tests/inscription_compiler.rs`. Defect tests
 were run against the pre-repair source to establish that they fail. Signed
 reveal tests also verify extracted witness script bytes and signature rejection.
 

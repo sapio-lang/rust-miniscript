@@ -2,7 +2,8 @@
 
 This review covers the inscription extension introduced on `inscribor` and
 published as `sapio-miniscript 7.0.2-alpha.0`. It checks script commitments,
-Miniscript analysis and library finalization; it is not an Ord indexer audit.
+Miniscript analysis, library finalization and reveal execution against Bitcoin
+Core. It is not an Ord indexer audit.
 
 ## Reference behavior
 
@@ -38,6 +39,63 @@ The regressions are in `tests/inscription_envelopes.rs`,
 were run against the pre-repair source to establish that they fail. Signed
 reveal tests also verify extracted witness script bytes and signature rejection.
 
+## Coverage of PR #3
+
+The expanded suite adds 26 tests to the original 25 inscription regressions.
+With all supported stable features, the complete crate suite passes 157 tests.
+The tests use literal wire fixtures, separately built scripts and direct Bitcoin
+Taproot commitments in addition to parser/encoder round trips.
+
+| Boundary | Additional evidence |
+| --- | --- |
+| Authoring | All eight fields; absent/empty values; lengths 1/2, 75/76, 255/256, 519/520 and body/metadata chunk boundaries 521/1040/1041; numeric-opcode and non-UTF8 content bytes |
+| Commitments | Binary/text/Serde and descriptor round trips, 64 generated field combinations, nested pre/post wrappers, combinators and a three-leaf Taproot tree |
+| Rejection | All 5,040 header-field orders, all 249 unsupported one-byte tags, 1,686 truncation positions, 256 single-bit mutation parses, nonminimal pushes, noncanonical chunks and oversized fields |
+| Discovery | Literal payloads and diagnostic flags for duplicate/dangling fields, empty values/body, unknown even/odd tags, pushnum values, stutter and incomplete or wrong protocol prefixes |
+| Policies | Nested key/hash translation and callback errors, distinct inscription effects sharing a key, actual 3,600/3,601-byte witness-script bounds and compiler limits |
+| Spending | Real ECDSA/WSH and Schnorr/Taproot finalization for nested/multiple envelopes, both branch choices, every 2-of-3 signer subset, height/time CLTV and CSV boundaries, all four hashlock families and malleable satisfaction APIs |
+| Tampering | Missing/wrong signatures and preimages, nonminimal selectors, dirty stacks, changed outputs/outpoints/lock fields/funding amounts, switched Taproot leaves and altered Merkle proofs |
+
+The mutation property requires every accepted script to re-encode exactly; it
+does not assert that all valid mutations must be accepted. These are bounded,
+deterministic cases, not an exhaustive search of arbitrary scripts. The compiler
+can return `LimitsExceeded` after pruning a viable alternative representation;
+the tests retain that documented search limitation while checking resource bounds.
+
+A mutation check in an isolated copy confirmed that the new tests detect three
+deliberately introduced faults: a wrong delegate field tag, discarded stutter
+diagnostics and disabled exact-byte reconstruction checks. Each mutant compiled
+and then failed assertions at runtime; the clean controls passed before and
+after the experiment. This checks those oracles, not an overall mutation score.
+
+## Independent Bitcoin Core check
+
+CI also runs `contrib/check_inscriptions.py` against Bitcoin Core 31.1, with the
+release archive pinned by its [official SHA256 checksum][core-checksums]. The
+test creates a temporary regtest chain with networking disabled, funds the
+fixture outputs and checks each candidate through [testmempoolaccept][core-rpc].
+Candidates are checked separately and never submitted, so negative tests cannot
+pass merely because an earlier candidate already spent the output.
+
+Core accepts five library-finalized reveals covering prefix/postfix envelopes,
+empty/chunked body and metadata, multiple envelopes, and a 2-of-3 condition.
+It rejects 20 variants with changed signatures, inscription content, control
+blocks or outputs. A separately signed invalid script also confirms that a
+521-byte push is rejected inside an unexecuted envelope, with the expected
+push-size error. These vectors use ordinary Taproot conditions, not native CTV.
+
+Run the same check with a local Bitcoin Core installation:
+
+```sh
+cargo build --locked --example inscription_node_fixture
+python3 contrib/check_inscriptions.py --bitcoind /path/to/bitcoind \
+  --fixture target/debug/examples/inscription_node_fixture
+```
+
+The regular tests run in the existing Linux/macOS and optional-feature CI jobs;
+the independent node check has a dedicated workflow job that fails on any
+acceptance or rejection mismatch.
+
 ## Supported domain
 
 The authoring model includes content type, content encoding, metaprotocol,
@@ -60,11 +118,12 @@ builder should call it before constructing scripts; Miniscript AST and concrete
 policy validation call it automatically. The caller still authenticates funding
 data, supplies the intended signing keys, and chooses an appropriate chain.
 
-These tests exercise the library interpreter and PSBT finalizer. They do not run
-a Bitcoin node or Ord indexer, establish sat assignment/reinscription behavior,
-or authenticate an inscription's funding history. Node execution and Ord index
-comparison remain separate integration work.
+The tests do not run an Ord indexer, establish sat assignment/reinscription
+behavior, or authenticate an inscription's funding history. Ord index comparison
+and long-running coverage-guided fuzzing remain separate validation work.
 
 [handbook]: https://docs.ordinals.com/inscriptions.html
 [ord-parser]: https://github.com/ordinals/ord/blob/899e309424dd60e1c8065a7727a76d9b675a6ac4/src/inscriptions/envelope.rs
 [bitcoin-interpreter]: https://github.com/bitcoin/bitcoin/blob/master/src/script/interpreter.cpp
+[core-checksums]: https://bitcoincore.org/bin/bitcoin-core-31.1/SHA256SUMS
+[core-rpc]: https://bitcoincore.org/en/doc/31.0.0/rpc/rawtransactions/testmempoolaccept/

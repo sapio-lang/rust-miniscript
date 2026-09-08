@@ -83,6 +83,14 @@ verify the complete transaction. Automatic ordering does not solve circular
 P2SH CTV commitments or extend the set of accepted bare descriptors. Script
 verification uses supplied prevouts; callers must authenticate funding data.
 
+## Inscription support
+
+The inscription extension supports canonical envelopes from its existing field
+model. Script and policy parsing preserve committed bytes; unsupported encodings
+return errors. Tests cover parsing, resource and key analysis, witness extraction,
+and signed Taproot reveals. See the [correctness review](docs/INSCRIPTIONS.md)
+for the repaired defects, source references, and supported domain.
+
 ## Contributing
 Contributions are generally welcome. If you intend to make larger changes please
 discuss them in an issue before PRing them to avoid duplicate work and

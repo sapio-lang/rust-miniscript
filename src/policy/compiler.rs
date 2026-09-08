@@ -831,11 +831,19 @@ where
     match *policy {
         Concrete::Inscribe(ref inscription, ref sub) => {
             let subcomp = best_compilations(policy_cache, &sub, sat_prob, dissat_prob)?;
-            for (k, v) in subcomp {
-                insert_wrap!(AstElemExt::terminal(Terminal::InscribePre(
-                    Arc::new(vec![inscription.as_ref().clone()]),
-                    v.ms.clone()
-                )))
+            for (_, child) in subcomp {
+                let ast =
+                    Terminal::InscribePre(Arc::new(vec![inscription.as_ref().clone()]), child.ms);
+                // The envelope adds no witness cost. Preserve the compiled
+                // child's costs: recursive recomputation loses the branch
+                // probabilities used to compile its internal disjunctions.
+                insert_wrap!(AstElemExt {
+                    ms: Arc::new(
+                        Miniscript::from_ast(ast)
+                            .expect("validated inscription preserves the compiled child's type")
+                    ),
+                    comp_ext_data: child.comp_ext_data,
+                });
             }
         }
         Concrete::Unsatisfiable => {

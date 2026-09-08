@@ -662,7 +662,11 @@ where
                         return res;
                     }
                 }
-                Terminal::Alt(ref sub) | Terminal::Swap(ref sub) | Terminal::Check(ref sub) => {
+                Terminal::Alt(ref sub)
+                | Terminal::Swap(ref sub)
+                | Terminal::Check(ref sub)
+                | Terminal::InscribePre(_, ref sub)
+                | Terminal::InscribePost(_, ref sub) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);
                     debug_assert_eq!(node_state.n_satisfied, 0);
                     self.push_evaluation_state(sub, 0, 0);
@@ -1052,7 +1056,7 @@ mod tests {
     use super::*;
     use bitcoin;
     use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
-    use bitcoin::secp256k1::{self, Secp256k1, Parity};
+    use bitcoin::secp256k1::{self, Parity, Secp256k1};
     use miniscript::context::NoChecks;
     use Miniscript;
     use MiniscriptKey;

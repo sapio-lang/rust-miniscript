@@ -69,7 +69,7 @@ pub enum Policy<Pk: MiniscriptKey> {
     /// A SHA256 whose must match the tx template
     TxTemplate(sha256::Hash),
     /// Inscription Content
-    Inscribe(Box<Inscription>, Box<Policy<Pk>>)
+    Inscribe(Box<Inscription>, Box<Policy<Pk>>),
 }
 
 /// Detailed Error type for Policies
@@ -96,6 +96,10 @@ pub enum PolicyError {
     HeightTimeLockCombination,
     /// Duplicate Public Keys
     DuplicatePubKeys,
+    /// An inscription contains an oversized unchunked push.
+    InvalidInscription,
+    /// Entailment does not model inscription effects.
+    InscriptionEntailmentUnsupported,
 }
 
 impl error::Error for PolicyError {}
@@ -129,6 +133,12 @@ impl fmt::Display for PolicyError {
                 f.write_str("Cannot lift policies that have a heightlock and timelock combination")
             }
             PolicyError::DuplicatePubKeys => f.write_str("Policy contains duplicate keys"),
+            PolicyError::InvalidInscription => {
+                f.write_str("Policy contains an invalid inscription push")
+            }
+            PolicyError::InscriptionEntailmentUnsupported => {
+                f.write_str("Policy entailment does not support inscription effects")
+            }
         }
     }
 }
@@ -171,7 +181,9 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             Policy::Threshold(_, ref subs) | Policy::And(ref subs) => {
                 subs.iter().all(|sub| sub.real_for_each_key(&mut *pred))
             }
-            Policy::Or(ref subs) => subs.iter().all(|(_, sub)| sub.real_for_each_key(&mut *pred)),
+            Policy::Or(ref subs) => subs
+                .iter()
+                .all(|(_, sub)| sub.real_for_each_key(&mut *pred)),
             Policy::Inscribe(_, ref sub) => sub.real_for_each_key(pred),
         }
     }
@@ -252,6 +264,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     pub fn keys(&self) -> Vec<&Pk> {
         match *self {
             Policy::Key(ref pk) => vec![pk],
+            Policy::Inscribe(_, ref sub) => sub.keys(),
             Policy::Threshold(_k, ref subs) => subs
                 .iter()
                 .map(|sub| sub.keys())
@@ -352,6 +365,12 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
         self.check_timelocks()?;
         self.check_duplicate_keys()?;
         match *self {
+            Policy::Inscribe(ref inscription, ref sub) => {
+                inscription
+                    .validate()
+                    .map_err(|_| PolicyError::InvalidInscription)?;
+                sub.is_valid()
+            }
             Policy::And(ref subs) => {
                 if subs.len() != 2 {
                     Err(PolicyError::NonBinaryArgAnd)
@@ -489,7 +508,7 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
             Policy::Inscribe(ref i, ref sub) => {
                 write!(f, "inscribe({:?},{:?})", i, sub)
-            },
+            }
         }
     }
 }
@@ -536,7 +555,7 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
             Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
             Policy::Inscribe(ref i, ref sub) => {
                 write!(f, "inscribe({},{})", i, sub)
-            },
+            }
         }
     }
 }
@@ -674,6 +693,10 @@ where
             ("txtmpl", 1) => expression::terminal(&top.args[0], |x| {
                 sha256::Hash::from_hex(x).map(Policy::TxTemplate)
             }),
+            ("inscribe", 2) => Ok(Policy::Inscribe(
+                super::parse_inscription(&top.args[0])?,
+                Box::new(Policy::from_tree(&top.args[1])?),
+            )),
             _ => Err(errstr(top.name)),
         }
         .map(|res| (frag_prob, res))
@@ -701,8 +724,10 @@ mod tests {
         let liquid_pol = Policy::<String>::from_str(
             "or(and(older(4096),thresh(2,pk(A),pk(B),pk(C))),thresh(11,pk(F1),pk(F2),pk(F3),pk(F4),pk(F5),pk(F6),pk(F7),pk(F8),pk(F9),pk(F10),pk(F11),pk(F12),pk(F13),pk(F14)))").unwrap();
         let mut count = 0;
-        assert!(liquid_pol.for_each_key(|_| { count +=1; true }));
+        assert!(liquid_pol.for_each_key(|_| {
+            count += 1;
+            true
+        }));
         assert_eq!(count, 17);
     }
 }
-

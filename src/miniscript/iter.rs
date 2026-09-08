@@ -63,7 +63,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
             | Terminal::DupIf(ref node)
             | Terminal::Verify(ref node)
             | Terminal::NonZero(ref node)
-            | Terminal::ZeroNotEqual(ref node) => vec![node],
+            | Terminal::ZeroNotEqual(ref node)
+            | Terminal::InscribePre(_, ref node)
+            | Terminal::InscribePost(_, ref node) => vec![node],
 
             Terminal::AndV(ref node1, ref node2)
             | Terminal::AndB(ref node1, ref node2)
@@ -90,6 +92,8 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
             | (0, &Terminal::Verify(ref node))
             | (0, &Terminal::NonZero(ref node))
             | (0, &Terminal::ZeroNotEqual(ref node))
+            | (0, &Terminal::InscribePre(_, ref node))
+            | (0, &Terminal::InscribePost(_, ref node))
             | (0, &Terminal::AndV(ref node, _))
             | (0, &Terminal::AndB(ref node, _))
             | (0, &Terminal::OrB(ref node, _))

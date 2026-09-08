@@ -43,6 +43,8 @@ fn return_none<T>(_: usize) -> Option<T> {
 pub enum ErrorKind {
     /// Relative or absolute timelock had an invalid time value (either 0, or >=0x80000000)
     InvalidTime,
+    /// An inscription wrapper has no envelope or contains an oversized push.
+    InvalidInscription,
     /// Passed a `z` argument to a `d` wrapper when `z` was expected
     NonZeroDupIf,
     /// Multisignature or threshold policy had a `k` value of 0
@@ -120,6 +122,11 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> error::Error for Error<Pk, Ctx> {
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Display for Error<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.error {
+            ErrorKind::InvalidInscription => write!(
+                f,
+                "fragment «{}» contains an invalid inscription envelope",
+                self.fragment,
+            ),
             ErrorKind::InvalidTime => write!(
                 f,
                 "fragment «{}» represents a timelock which value is invalid (time must be in [1; 0x80000000])",
@@ -546,9 +553,10 @@ pub trait Property: Sized {
                 })
             }
             Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
-            Terminal::InscribePre(_, ref n) |
-            Terminal::InscribePost(_, ref n) => {
-                get_child(&n.node, 1)
+            Terminal::InscribePre(ref inscription, ref n)
+            | Terminal::InscribePost(ref inscription, ref n) => {
+                let child = get_child(&n.node, 0)?;
+                wrap_err(Self::inscribing(inscription, child))
             }
         };
         if let Ok(ref ret) = ret {

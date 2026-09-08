@@ -97,10 +97,12 @@ mod private {
     impl Sealed for super::bitcoin::secp256k1::XOnlyPublicKey {}
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum NonTerm {
     Expression,
     WExpression,
+    InscribePre,
+    InscribePost(Arc<Vec<Inscription>>),
     Swap,
     MaybeAndV,
     Alt,
@@ -301,8 +303,15 @@ pub fn parse<Ctx: ScriptContext>(
     loop {
         match non_term.pop() {
             Some(NonTerm::Expression) => {
+                non_term.push(NonTerm::InscribePre);
                 match_token!(
                     tokens,
+                    Tk::Inscription(script) => {
+                        tokens.un_next(Tk::Inscription(script));
+                        let inscriptions = take_inscriptions(tokens)?;
+                        non_term.push(NonTerm::InscribePost(inscriptions));
+                        non_term.push(NonTerm::Expression);
+                    },
                     // pubkey
                     Tk::Bytes33(pk) => {
                         let ret = Ctx::Key::from_slice(pk)
@@ -517,6 +526,15 @@ pub fn parse<Ctx: ScriptContext>(
                     },
                 );
             }
+            Some(NonTerm::InscribePre) => {
+                if matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+                    let inscriptions = take_inscriptions(tokens)?;
+                    term.reduce1(|sub| Terminal::InscribePre(inscriptions, sub))?;
+                }
+            }
+            Some(NonTerm::InscribePost(inscriptions)) => {
+                term.reduce1(|sub| Terminal::InscribePost(inscriptions, sub))?;
+            }
             Some(NonTerm::MaybeAndV) => {
                 // Handle `and_v` prefixing
                 if is_and_v(tokens) {
@@ -637,12 +655,20 @@ pub fn parse<Ctx: ScriptContext>(
                 );
             }
             Some(NonTerm::WExpression) => {
-                // W expression must be either from swap or Fromaltstack
-                match_token!(tokens,
-                    Tk::FromAltStack => { non_term.push(NonTerm::Alt);},
-                    tok => { tokens.un_next(tok); non_term.push(NonTerm::Swap);},);
-                non_term.push(NonTerm::MaybeAndV);
-                non_term.push(NonTerm::Expression);
+                non_term.push(NonTerm::InscribePre);
+                if matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+                    let inscriptions = take_inscriptions(tokens)?;
+                    non_term.push(NonTerm::InscribePost(inscriptions));
+                    non_term.push(NonTerm::WExpression);
+                } else {
+                    // A W fragment is an a: or s: wrapper, possibly followed
+                    // by an inscription that the branch above has consumed.
+                    match_token!(tokens,
+                        Tk::FromAltStack => { non_term.push(NonTerm::Alt); },
+                        tok => { tokens.un_next(tok); non_term.push(NonTerm::Swap); },);
+                    non_term.push(NonTerm::MaybeAndV);
+                    non_term.push(NonTerm::Expression);
+                }
             }
             None => {
                 // Done :)
@@ -654,6 +680,18 @@ pub fn parse<Ctx: ScriptContext>(
     assert_eq!(non_term.len(), 0);
     assert_eq!(term.0.len(), 1);
     Ok(term.pop().unwrap())
+}
+
+fn take_inscriptions(tokens: &mut TokenIter) -> Result<Arc<Vec<Inscription>>, Error> {
+    let mut inscriptions = Vec::new();
+    while matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+        if let Some(Tk::Inscription(script)) = tokens.next() {
+            inscriptions.extend(crate::ord::parse_inscriptions(&script)?.into_iter().rev());
+        }
+    }
+    // Tokens are consumed backward; preserve envelope order in the script.
+    inscriptions.reverse();
+    Ok(Arc::new(inscriptions))
 }
 
 fn is_and_v(tokens: &mut TokenIter) -> bool {

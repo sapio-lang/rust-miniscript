@@ -51,3 +51,7 @@ name = "psbt"
 
 [[example]]
 name = "xpub_descriptors"
+
+[[example]]
+name = "inscription_node_fixture"
+path = "tests/fixtures/inscription_node.rs"

@@ -699,8 +699,8 @@ mod tests {
     fn semantic_analysis() {
         let policy = StringPolicy::from_str("pkh()").unwrap();
         assert_eq!(policy, Policy::KeyHash("".to_owned()));
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(0), policy.clone());
         assert_eq!(policy.clone().at_age(10000), policy.clone());
         assert_eq!(policy.n_keys(), 1);
@@ -708,7 +708,7 @@ mod tests {
 
         let policy = StringPolicy::from_str("older(1000)").unwrap();
         assert_eq!(policy, Policy::Older(1000));
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.relative_timelocks(), vec![1000]);
         assert_eq!(policy.clone().at_age(0), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_age(999), Policy::Unsatisfiable);
@@ -726,7 +726,7 @@ mod tests {
             )
         );
         assert_eq!(policy.relative_timelocks(), vec![1000]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(0), Policy::KeyHash("".to_owned()));
         assert_eq!(policy.clone().at_age(999), Policy::KeyHash("".to_owned()));
         assert_eq!(policy.clone().at_age(1000), policy.clone().normalized());
@@ -742,8 +742,8 @@ mod tests {
                 vec![Policy::KeyHash("".to_owned()), Policy::Unsatisfiable,]
             )
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), Some(1));
 
@@ -755,8 +755,8 @@ mod tests {
                 vec![Policy::KeyHash("".to_owned()), Policy::Unsatisfiable,]
             )
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), None);
 
@@ -813,7 +813,7 @@ mod tests {
         let policy = StringPolicy::from_str("after(1000)").unwrap();
         assert_eq!(policy, Policy::After(1000));
         assert_eq!(policy.absolute_timelocks(), vec![1000]);
-        assert_eq!(policy.relative_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
         assert_eq!(policy.clone().at_height(0), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_height(999), Policy::Unsatisfiable);
         assert_eq!(policy.clone().at_height(1000), policy.clone());

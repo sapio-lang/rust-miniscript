@@ -49,7 +49,7 @@ use miniscript::decode::Terminal;
 use miniscript::types::extra_props::ExtData;
 use miniscript::types::Type;
 
-use std::cmp;
+use std::{cmp, hash};
 use std::sync::Arc;
 use MiniscriptKey;
 use {expression, Error, ForEach, ForEachKey, ToPublicKey, TranslatePk};
@@ -57,7 +57,7 @@ use {expression, Error, ForEach, ForEachKey, ToPublicKey, TranslatePk};
 #[cfg(test)]
 mod ms_tests;
 /// Top-level script AST type
-#[derive(Clone, Hash)]
+#[derive(Clone)]
 pub struct Miniscript<Pk: MiniscriptKey, Ctx: ScriptContext> {
     ///A node in the Abstract Syntax Tree(
     pub node: Terminal<Pk, Ctx>,
@@ -100,6 +100,13 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> PartialEq for Miniscript<Pk, Ctx> {
 /// The type information and extra_properties can be deterministically determined
 /// by the ast.
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> Eq for Miniscript<Pk, Ctx> {}
+
+/// Hashing must match node-only equality even if public analysis metadata changes.
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> hash::Hash for Miniscript<Pk, Ctx> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.node.hash(state);
+    }
+}
 
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Debug for Miniscript<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -485,6 +492,24 @@ mod tests {
 
     type Segwitv0Script = Miniscript<bitcoin::PublicKey, Segwitv0>;
     type Tapscript = Miniscript<bitcoin::secp256k1::XOnlyPublicKey, Tap>;
+
+    #[test]
+    fn equal_miniscripts_hash_equally_despite_metadata_changes() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash as StdHash, Hasher};
+
+        let original = Segwitv0Script::from_ast(Terminal::True).unwrap();
+        let mut changed = original.clone();
+        changed.ty.corr.unit = !changed.ty.corr.unit;
+        changed.ext.pk_cost += 1;
+        assert_eq!(original, changed);
+
+        let mut original_hash = DefaultHasher::new();
+        let mut changed_hash = DefaultHasher::new();
+        StdHash::hash(&original, &mut original_hash);
+        StdHash::hash(&changed, &mut changed_hash);
+        assert_eq!(original_hash.finish(), changed_hash.finish());
+    }
 
     fn pubkeys(n: usize) -> Vec<bitcoin::PublicKey> {
         let mut ret = Vec::with_capacity(n);

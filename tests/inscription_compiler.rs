@@ -1,7 +1,8 @@
 #![cfg(feature = "compiler")]
 
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+
+use std::sync::Arc;
 
 use bitcoin::secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey};
 use bitcoin::PublicKey;
@@ -17,17 +18,12 @@ fn key(byte: u8) -> PublicKey {
 }
 
 fn check_compilation<Ctx: ScriptContext>(child: Concrete<PublicKey>) {
-    let inscription = Inscription::new(
-        Some(b"text/plain".to_vec()),
-        Some(b"compiled inscription".to_vec()),
-    );
-    let policy = Concrete::Inscribe(Box::new(inscription.clone()), Box::new(child));
+    let inscription =
+        Inscription::new(Some(b"text/plain".to_vec()), Some(b"compiled inscription".to_vec()));
+    let policy = Concrete::Inscribe(Box::new(inscription.clone()), std::sync::Arc::new(child));
     let compiled = policy.compile::<Ctx>().unwrap();
     compiled.sanity_check().unwrap();
-    assert_eq!(
-        compiled.lift().unwrap().sorted(),
-        policy.lift().unwrap().sorted()
-    );
+    assert_eq!(compiled.lift().unwrap().sorted(), policy.lift().unwrap().sorted());
     let embedded: Vec<_> = compiled
         .iter()
         .flat_map(|ms| match ms.node {
@@ -40,9 +36,12 @@ fn check_compilation<Ctx: ScriptContext>(child: Concrete<PublicKey>) {
     assert_eq!(embedded, vec![&inscription]);
     let script = compiled.encode();
     assert_eq!(
-        Miniscript::<Ctx::Key, Ctx>::parse(&script)
-            .unwrap()
-            .encode(),
+        Miniscript::<Ctx::Key, Ctx>::decode_with_ext(
+            &script,
+            &miniscript::ExtParams::sane().raw_pkh()
+        )
+        .unwrap()
+        .encode(),
         script
     );
 }
@@ -50,7 +49,10 @@ fn check_compilation<Ctx: ScriptContext>(child: Concrete<PublicKey>) {
 #[test]
 fn inscription_compilation_preserves_compiled_child_conditions() {
     let owner = Concrete::Key(key(1));
-    let alternative = Concrete::Or(vec![(9, owner.clone()), (1, Concrete::Key(key(2)))]);
+    let alternative = Concrete::Or(vec![
+        (9, Arc::new(owner.clone())),
+        (1, Arc::new(Concrete::Key(key(2)))),
+    ]);
     for child in &[owner, alternative] {
         check_compilation::<Segwitv0>(child.clone());
         check_compilation::<Tap>(child.clone());

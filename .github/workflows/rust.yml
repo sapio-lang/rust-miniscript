@@ -1,85 +1,271 @@
+---   # rust-miniscript CI: If you edit this file please update README.md
+on:   # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - master
+      - 'test-ci/**'
+  pull_request:
+
 name: Continuous integration
 
-on:
-  push:
-    branches: [master, inscribor]
-  pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: rust-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  # `unstable` enables nightly-only benchmark tests.
-  STABLE_FEATURES: compiler,use-serde,use-schemars,rand,trace
-
 jobs:
-  test:
-    name: Tests (${{ matrix.os }})
+  Prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      nightly_version: ${{ steps.read_toolchain.outputs.nightly_version }}
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Read nightly version"
+        id: read_toolchain
+        run: echo "nightly_version=$(cat nightly-version)" >> $GITHUB_OUTPUT
+
+  Stable:                       # 2 jobs, one per lock file.
+    name: Test - stable toolchain
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
+        dep: [minimal, recent]
     steps:
-      - uses: actions/checkout@v7
-      - name: Install the pinned toolchain
-        run: rustup show
-      - run: cargo test --locked --features "$STABLE_FEATURES"
-      - name: Run examples
-        run: |
-          for example in htlc parse sign_multisig verify_tx psbt xpub_descriptors; do
-            cargo run --locked --features "$STABLE_FEATURES" --example "$example"
-          done
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@stable
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh stable
 
-  features:
-    name: Feature coverage and documentation
-    runs-on: ubuntu-24.04
+  Nightly:                      # 2 jobs, one per lock file.
+    name: Test - nightly toolchain
+    needs: Prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [minimal, recent]
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - run: cargo test --locked --no-default-features
-      - name: Test each optional feature separately
-        run: |
-          for feature in compiler use-serde use-schemars rand; do
-            cargo test --locked --no-default-features --features "$feature"
-          done
-      - run: cargo clippy --locked --all-targets --features "$STABLE_FEATURES"
-      - run: cargo doc --locked --no-deps --features "$STABLE_FEATURES"
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.Prepare.outputs.nightly_version }}
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh nightly
 
-  wasm:
-    name: WASM library
-    runs-on: ubuntu-24.04
-    env:
-      CC_wasm32_unknown_unknown: clang
+  MSRV:                         # 2 jobs, one per lock file.
+    name: Test - 1.63.0 toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [minimal, recent]
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - name: Check the Sapio guest feature set
-        run: >-
-          cargo check --locked --lib --target wasm32-unknown-unknown
-          --no-default-features --features compiler,use-serde,use-schemars
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.63.0"
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh msrv
 
-  inscriptions:
-    name: Inscription reveals against Bitcoin Core
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  Lint:
+    name: Lint - nightly toolchain
+    needs: Prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [recent]
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - name: Install pinned Bitcoin Core
-        run: |
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/bitcoin.tar.gz" \
-            https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz
-          echo "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e  $RUNNER_TEMP/bitcoin.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/bitcoin.tar.gz" -C "$RUNNER_TEMP"
-      - run: cargo build --locked --example inscription_node_fixture
-      - name: Validate generated reveals with Core
-        run: >-
-          python3 contrib/check_inscriptions.py
-          --bitcoind "$RUNNER_TEMP/bitcoin-31.1/bin/bitcoind"
-          --fixture target/debug/examples/inscription_node_fixture
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.Prepare.outputs.nightly_version }}
+      - name: "Install clippy"
+        run: rustup component add clippy
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh lint
+
+  Docs:
+    name: Docs - stable toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [recent]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@stable
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh docs
+
+  Docsrs:
+    name: Docs - nightly toolchain
+    needs: Prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [recent]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.Prepare.outputs.nightly_version }}
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh docsrs
+
+  Bench:
+    name: Bench - nightly toolchain
+    needs: Prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [recent]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Checkout maintainer tools"
+        uses: actions/checkout@v4
+        with:
+          repository: rust-bitcoin/rust-bitcoin-maintainer-tools
+          ref: c3324024ced9bb1eb854397686919c3ff7d97e1e
+          path: maintainer-tools
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.Prepare.outputs.nightly_version }}
+      - name: "Set dependencies"
+        run: cp Cargo-${{ matrix.dep }}.lock Cargo.lock
+      - name: "Run test script"
+        run: ./maintainer-tools/ci/run_task.sh bench
+
+  Format:                       #  1 job, run cargo fmt directly.
+    name: Format - nightly toolchain
+    needs: Prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.Prepare.outputs.nightly_version }}
+      - name: "Install rustfmt"
+        run: rustup component add rustfmt
+      - name: "Check formatting"
+        run: cargo fmt --all -- --check
+
+  Integration:                  # 1 job for each bitcoind version we support.
+    name: Integration tests - stable toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature:
+          [
+            "26_0",
+            "25_2",
+            "25_1",
+            "25_0",
+            "24_2",
+            "24_1",
+            "24_0_1",
+            "23_2",
+            "23_1",
+            "23_0",
+            "22_1",
+            "22_0",
+            "0_21_2",
+            "0_20_2",
+            "0_19_1",
+            "0_18_1",
+            "0_17_1",
+          ]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@stable
+      - name: "Run integration tests"
+        run: cd bitcoind-tests && cargo test --features=${{ matrix.feature }}
+
+  Embedded:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Set up QEMU
+        run: sudo apt update && sudo apt install -y qemu-system-arm gcc-arm-none-eabi
+      - name: Checkout Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          components: rust-src
+          target: thumbv7m-none-eabi
+      - name: Run
+        env:
+          RUSTFLAGS: "-C link-arg=-Tlink.x"
+          CARGO_TARGET_THUMBV7M_NONE_EABI_RUNNER: "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"
+        run: cd embedded && cargo run --target thumbv7m-none-eabi --release

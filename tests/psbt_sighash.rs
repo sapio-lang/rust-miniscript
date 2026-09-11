@@ -1,30 +1,30 @@
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+extern crate miniscript;
 
-use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use bitcoin::util::schnorr::TapTweak;
-use bitcoin::util::sighash::{Prevouts, SighashCache};
-use bitcoin::util::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-use bitcoin::{EcdsaSig, EcdsaSighashType, OutPoint, PublicKey, SchnorrSig, SchnorrSighashType};
-use bitcoin::{Script, Transaction, TxIn, TxOut, XOnlyPublicKey};
-use miniscript::psbt::{interpreter_check, Error, InputError, PsbtExt};
-use miniscript::{Miniscript, Tap};
 use std::str::FromStr;
 
-fn transaction(script_pubkey: Script) -> Transaction {
+use bitcoin::key::TapTweak;
+use bitcoin::psbt::Psbt;
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+use bitcoin::{
+    EcdsaSighashType, OutPoint, PublicKey, ScriptBuf, TapSighashType, Transaction, TxIn, TxOut,
+    XOnlyPublicKey,
+};
+use miniscript::psbt::{interpreter_check, Error, InputError, PsbtExt};
+use miniscript::{Miniscript, Tap};
+
+fn transaction(script_pubkey: ScriptBuf) -> Transaction {
     Transaction {
-        version: 2,
-        lock_time: 0,
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn::default()],
-        output: vec![TxOut {
-            value: 10_000,
-            script_pubkey,
-        }],
+        output: vec![TxOut { value: bitcoin::Amount::from_sat(10_000), script_pubkey }],
     }
 }
 
-fn taproot_psbt(hash_ty: SchnorrSighashType, script_spend: bool) -> Psbt {
+fn taproot_psbt(hash_ty: TapSighashType, script_spend: bool) -> Psbt {
     let secp = Secp256k1::new();
     let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[1; 32]).unwrap());
     let public_key = keypair.x_only_public_key().0;
@@ -36,9 +36,9 @@ fn taproot_psbt(hash_ty: SchnorrSighashType, script_spend: bool) -> Psbt {
         .unwrap()
         .finalize(&secp, public_key)
         .unwrap();
-    let funding = transaction(Script::new_v1_p2tr_tweaked(spend_info.output_key()));
-    let mut tx = transaction(Script::new());
-    tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+    let funding = transaction(ScriptBuf::new_p2tr_tweaked(spend_info.output_key()));
+    let mut tx = transaction(ScriptBuf::new());
+    tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
     let leaf = (script, LeafVersion::TapScript);
     let leaf_hash = TapLeafHash::from_script(&leaf.0, leaf.1);
     let prevouts = Prevouts::All(&funding.output);
@@ -54,14 +54,14 @@ fn taproot_psbt(hash_ty: SchnorrSighashType, script_spend: bool) -> Psbt {
     } else {
         keypair
             .tap_tweak(&secp, spend_info.merkle_root())
-            .into_inner()
+            .to_keypair()
     };
-    let signature = SchnorrSig {
-        sig: secp.sign_schnorr_no_aux_rand(
+    let signature = bitcoin::taproot::Signature {
+        signature: secp.sign_schnorr_no_aux_rand(
             &Message::from_digest_slice(&hash[..]).unwrap(),
             &signing_key,
         ),
-        hash_ty,
+        sighash_type: hash_ty,
     };
     let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
     psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
@@ -81,19 +81,17 @@ fn taproot_psbt(hash_ty: SchnorrSighashType, script_spend: bool) -> Psbt {
 fn ecdsa_psbt(hash_ty: EcdsaSighashType) -> Psbt {
     let secp = Secp256k1::new();
     let secret = SecretKey::from_slice(&[1; 32]).unwrap();
-    let public_key = PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(
-        &secp, &secret,
-    ));
-    let script = Script::new_p2pk(&public_key);
+    let public_key = PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret));
+    let script = ScriptBuf::new_p2pk(&public_key);
     let funding = transaction(script.clone());
-    let mut tx = transaction(Script::new());
-    tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+    let mut tx = transaction(ScriptBuf::new());
+    tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
     let hash = SighashCache::new(&tx)
         .legacy_signature_hash(0, &script, hash_ty.to_u32())
         .unwrap();
-    let signature = EcdsaSig {
-        sig: secp.sign_ecdsa(&Message::from_digest_slice(&hash[..]).unwrap(), &secret),
-        hash_ty,
+    let signature = bitcoin::ecdsa::Signature {
+        signature: secp.sign_ecdsa(&Message::from_digest_slice(&hash[..]).unwrap(), &secret),
+        sighash_type: hash_ty,
     };
     let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
     psbt.inputs[0].non_witness_utxo = Some(funding);
@@ -103,13 +101,7 @@ fn ecdsa_psbt(hash_ty: EcdsaSighashType) -> Psbt {
 
 fn assert_mismatch(error: Error, required: u32, got: u32) {
     match error {
-        Error::InputError(
-            InputError::SighashMismatch {
-                required: found,
-                got: actual,
-            },
-            0,
-        ) => {
+        Error::InputError(InputError::SighashMismatch { required: found, got: actual }, 0) => {
             assert_eq!((found, actual), (required, got));
         }
         other => panic!("expected sighash mismatch, got {:?}", other),
@@ -135,11 +127,11 @@ fn assert_rejected_without_mutation(mut psbt: Psbt, required: u32, got: u32) {
 fn matching_taproot_default_metadata_accepts_partial_and_final_signatures() {
     let secp = Secp256k1::verification_only();
     for &script_spend in &[false, true] {
-        let mut psbt = taproot_psbt(SchnorrSighashType::Default, script_spend);
-        psbt.inputs[0].sighash_type = Some(SchnorrSighashType::Default.into());
+        let mut psbt = taproot_psbt(TapSighashType::Default, script_spend);
+        psbt.inputs[0].sighash_type = Some(TapSighashType::Default.into());
         psbt.finalize_mut(&secp).unwrap();
         psbt.extract(&secp).unwrap();
-        psbt.inputs[0].sighash_type = Some(SchnorrSighashType::Default.into());
+        psbt.inputs[0].sighash_type = Some(TapSighashType::Default.into());
         psbt.finalize_mut(&secp).unwrap();
         psbt.extract(&secp).unwrap();
     }
@@ -149,13 +141,13 @@ fn matching_taproot_default_metadata_accepts_partial_and_final_signatures() {
 fn taproot_metadata_rejects_valid_none_signatures_before_mutation() {
     let secp = Secp256k1::verification_only();
     for &script_spend in &[false, true] {
-        let partial = taproot_psbt(SchnorrSighashType::None, script_spend);
+        let partial = taproot_psbt(TapSighashType::None, script_spend);
         // Independently verify that these are valid transaction signatures.
         let finalized = partial.clone().finalize(&secp).unwrap();
         finalized.extract(&secp).unwrap();
         for mut psbt in vec![partial, finalized] {
-            psbt.inputs[0].sighash_type = Some(SchnorrSighashType::Default.into());
-            assert_rejected_without_mutation(psbt, 0, SchnorrSighashType::None as u32);
+            psbt.inputs[0].sighash_type = Some(TapSighashType::Default.into());
+            assert_rejected_without_mutation(psbt, 0, TapSighashType::None as u32);
         }
     }
 }
@@ -164,8 +156,8 @@ fn taproot_metadata_rejects_valid_none_signatures_before_mutation() {
 fn absent_metadata_allows_valid_non_all_signatures() {
     let secp = Secp256k1::verification_only();
     for psbt in vec![
-        taproot_psbt(SchnorrSighashType::None, false),
-        taproot_psbt(SchnorrSighashType::None, true),
+        taproot_psbt(TapSighashType::None, false),
+        taproot_psbt(TapSighashType::None, true),
         ecdsa_psbt(EcdsaSighashType::None),
     ] {
         assert!(psbt.inputs[0].sighash_type.is_none());
@@ -187,10 +179,27 @@ fn ecdsa_metadata_rejects_valid_none_signatures_before_mutation() {
 
 #[test]
 fn taproot_metadata_also_checks_unused_partial_signatures() {
-    let mut psbt = taproot_psbt(SchnorrSighashType::Default, false);
-    let script_psbt = taproot_psbt(SchnorrSighashType::None, true);
+    let mut psbt = taproot_psbt(TapSighashType::Default, false);
+    let script_psbt = taproot_psbt(TapSighashType::None, true);
     assert_eq!(psbt.unsigned_tx, script_psbt.unsigned_tx);
     psbt.inputs[0].tap_script_sigs = script_psbt.inputs[0].tap_script_sigs.clone();
-    psbt.inputs[0].sighash_type = Some(SchnorrSighashType::Default.into());
+    psbt.inputs[0].sighash_type = Some(TapSighashType::Default.into());
     assert_rejected_without_mutation(psbt, 0, 2);
+}
+
+#[test]
+fn keypath_without_derivation_metadata_still_verifies_the_signature() {
+    let secp = Secp256k1::verification_only();
+    let mut psbt = taproot_psbt(TapSighashType::Default, false);
+    assert!(psbt.inputs[0].tap_internal_key.is_none());
+    assert!(psbt.inputs[0].tap_key_origins.is_empty());
+    psbt.clone()
+        .finalize(&secp)
+        .unwrap()
+        .extract(&secp)
+        .unwrap();
+    psbt.unsigned_tx.output[0].value -= bitcoin::Amount::ONE_SAT;
+    let before = psbt.clone();
+    assert!(psbt.finalize_mut(&secp).is_err());
+    assert_eq!(psbt, before);
 }

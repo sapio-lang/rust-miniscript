@@ -1,5 +1,5 @@
-///! Utils for working with ordinals, copied from Ord codebase
-use std::{collections::BTreeMap, mem};
+//! Utils for working with ordinals, copied from Ord codebase
+use core::mem;
 
 use super::*;
 
@@ -20,9 +20,7 @@ pub(crate) enum Tag {
 }
 
 impl Tag {
-    fn is_chunked(self) -> bool {
-        matches!(self, Self::Metadata)
-    }
+    fn is_chunked(self) -> bool { matches!(self, Self::Metadata) }
 
     pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
@@ -46,10 +44,14 @@ impl Tag {
 
             if self.is_chunked() && !value.is_empty() {
                 for chunk in value.chunks(MAX_SCRIPT_ELEMENT_SIZE) {
-                    tmp = tmp.push_slice(self.bytes()).push_slice(chunk);
+                    tmp = tmp
+                        .push_slice(push_bytes(self.bytes()))
+                        .push_slice(push_bytes(chunk));
                 }
             } else {
-                tmp = tmp.push_slice(self.bytes()).push_slice(value.as_slice());
+                tmp = tmp
+                    .push_slice(push_bytes(self.bytes()))
+                    .push_slice(push_bytes(value));
             }
 
             mem::swap(&mut tmp, builder);

@@ -1,31 +1,22 @@
-use std::{collections::BTreeMap, convert::TryInto};
+use core::convert::TryInto;
+use core::iter::Peekable;
 
-use bitcoin::{util::taproot::TAPROOT_ANNEX_PREFIX, Script, Transaction};
-#[cfg(feature = "schemars")]
-use schemars::JsonSchema;
+use bitcoin::blockdata::opcodes;
+use bitcoin::blockdata::script::Instruction::{self, Op, PushBytes};
+use bitcoin::blockdata::script::{self, Instructions};
+use bitcoin::taproot::TAPROOT_ANNEX_PREFIX;
+use bitcoin::{Script, Transaction};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use {
-    super::*,
-    bitcoin::blockdata::{
-        opcodes,
-        script::{
-            self,
-            Instruction::{self, Op, PushBytes},
-            Instructions,
-        },
-    },
-    std::iter::Peekable,
-};
+use super::*;
 
-type Result<T> = std::result::Result<T, script::Error>;
+type Result<T> = core::result::Result<T, script::Error>;
 type RawEnvelope = Envelope<Vec<Vec<u8>>>;
 pub(crate) type ParsedEnvelope = Envelope<Inscription>;
 
 #[derive(Default, PartialEq, Clone, Debug, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "schemars", derive(JsonSchema))]
 pub struct Envelope<T> {
     pub input: u32,
     pub offset: u32,
@@ -120,9 +111,9 @@ impl RawEnvelope {
                 .len()
                 .checked_sub(offset)
                 .and_then(|index| input.witness.iter().nth(index))
-                .map(|bytes| Script::from(bytes.to_vec()));
+                .map(Script::from_bytes);
             if let Some(tapscript) = tapscript {
-                if let Ok(input_envelopes) = Self::from_tapscript(&tapscript, i) {
+                if let Ok(input_envelopes) = Self::from_tapscript(tapscript, i) {
                     envelopes.extend(input_envelopes);
                 }
             }
@@ -141,7 +132,7 @@ impl RawEnvelope {
 
         let mut stuttered = false;
         while let Some(instruction) = instructions.next().transpose()? {
-            if instruction == PushBytes(&[]) {
+            if instruction == PushBytes(super::push_bytes(&[])) {
                 let (stutter, envelope) =
                     Self::from_instructions(&mut instructions, input, envelopes.len(), stuttered)?;
                 if let Some(envelope) = envelope {
@@ -171,12 +162,12 @@ impl RawEnvelope {
         stutter: bool,
     ) -> Result<(bool, Option<Self>)> {
         if !Self::accept(instructions, Op(opcodes::all::OP_IF))? {
-            let stutter = instructions.peek() == Some(&Ok(PushBytes(&[])));
+            let stutter = instructions.peek() == Some(&Ok(PushBytes(super::push_bytes(&[]))));
             return Ok((stutter, None));
         }
 
-        if !Self::accept(instructions, PushBytes(&PROTOCOL_ID))? {
-            let stutter = instructions.peek() == Some(&Ok(PushBytes(&[])));
+        if !Self::accept(instructions, PushBytes(super::push_bytes(PROTOCOL_ID)))? {
+            let stutter = instructions.peek() == Some(&Ok(PushBytes(super::push_bytes(&[]))));
             return Ok((stutter, None));
         }
 
@@ -270,7 +261,7 @@ impl RawEnvelope {
                     payload.push(vec![16]);
                 }
                 Some(PushBytes(push)) => {
-                    payload.push(push.to_vec());
+                    payload.push(push.as_bytes().to_vec());
                 }
                 Some(_) => return Ok((false, None)),
             }

@@ -1,6 +1,4 @@
-extern crate sapio_miniscript as miniscript;
-
-use miniscript::bitcoin::{hashes::hex::FromHex, Script, XOnlyPublicKey};
+use miniscript::bitcoin::{ScriptBuf as Script, XOnlyPublicKey};
 use miniscript::{Miniscript, Tap};
 
 const KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -11,12 +9,9 @@ type TapScript = Miniscript<XOnlyPublicKey, Tap>;
 fn check_roundtrip(expression: &str) {
     let parsed = TapScript::from_str_insane(expression).unwrap();
     let script = parsed.encode();
-    let decoded = TapScript::parse_insane(&script).unwrap();
+    let decoded = TapScript::decode_with_ext(&script, &miniscript::ExtParams::insane()).unwrap();
     assert_eq!(decoded.encode(), script);
-    assert_eq!(
-        TapScript::from_str_insane(&parsed.to_string()).unwrap(),
-        parsed
-    );
+    assert_eq!(TapScript::from_str_insane(&parsed.to_string()).unwrap(), parsed);
     assert!(!format!("{:?}", parsed).is_empty());
 }
 
@@ -40,10 +35,7 @@ fn inscriptions_roundtrip_inside_combinators() {
             "or_i(inscribe_pre({},pk({})),inscribe_post({},pk({})))",
             CONTENT, KEY, EMPTY, KEY
         ),
-        format!(
-            "inscribe_pre({},inscribe_post({},pk({})))",
-            CONTENT, EMPTY, KEY
-        ),
+        format!("inscribe_pre({},inscribe_post({},pk({})))", CONTENT, EMPTY, KEY),
         format!("inscribe_pre({}{},pk({}))", CONTENT, EMPTY, KEY),
         format!("inscribe_post({}{},pk({}))", CONTENT, EMPTY, KEY),
         format!(
@@ -69,11 +61,7 @@ fn inscription_text_rejects_lossy_payloads() {
         "0063036f726451016168",           // Pushnum tag changes its encoding.
     ] {
         let expression = format!("inscribe_pre({},pk({}))", envelope, KEY);
-        assert!(
-            TapScript::from_str_insane(&expression).is_err(),
-            "{}",
-            expression
-        );
+        assert!(TapScript::from_str_insane(&expression).is_err(), "{}", expression);
     }
 }
 
@@ -88,7 +76,11 @@ fn inscription_binary_rejects_unterminated_or_lossy_envelopes() {
         "0063036f72644c0101016168",
     ] {
         let script = Script::from_hex(&format!("20{}ac{}", KEY, envelope)).unwrap();
-        assert!(TapScript::parse_insane(&script).is_err(), "{}", envelope);
+        assert!(
+            TapScript::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err(),
+            "{}",
+            envelope
+        );
     }
 }
 
@@ -101,7 +93,7 @@ fn inscription_parsing_preserves_minimal_push_rules_outside_envelopes() {
         "4d010011b2", // CSV with an unnecessary PUSHDATA2.
     ] {
         let script = Script::from_hex(&format!("{}{}", EMPTY, executable)).unwrap();
-        assert!(TapScript::parse_insane(&script).is_err());
+        assert!(TapScript::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err());
     }
 }
 
@@ -110,7 +102,7 @@ fn inscription_lexer_requires_closed_envelopes() {
     for script in &["0063036f7264", "0063036f7264000161"] {
         assert!(matches!(
             miniscript::miniscript::lex::lex(&Script::from_hex(script).unwrap()),
-            Err(miniscript::Error::InscriptionError(_))
+            Err(miniscript::miniscript::lex::Error::Inscription(_))
         ));
     }
 }

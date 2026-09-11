@@ -1,15 +1,4 @@
-// Miniscript
-// Written in 2020 by rust-miniscript developers
-//
-// To the extent possible under law, the author(s) have dedicated all
-// copyright and related and neighboring rights to this software to
-// the public domain worldwide. This software is distributed without
-// any warranty.
-//
-// You should have received a copy of the CC0 Public Domain Dedication
-// along with this software.
-// If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
-//
+// SPDX-License-Identifier: CC0-1.0
 
 //! # Bare Output Descriptors
 //!
@@ -18,22 +7,22 @@
 //! Also includes pk, and pkh descriptors
 //!
 
-use std::{fmt, str::FromStr};
+use core::fmt;
 
-use bitcoin::{self, blockdata::script, Script};
+use bitcoin::script::{self, PushBytes};
+use bitcoin::{Address, Network, ScriptBuf, Weight};
 
-use expression::{self, FromTree};
-use miniscript::context::ScriptContext;
-use policy::{semantic, Liftable};
-use util::{varint_len, witness_to_scriptsig};
-use {
-    BareCtx, Error, ForEach, ForEachKey, Miniscript, MiniscriptKey, Satisfier, ToPublicKey,
-    TranslatePk,
-};
-
-use super::{
-    checksum::{desc_checksum, verify_checksum},
-    DescriptorTrait,
+use crate::descriptor::{write_descriptor, DefiniteDescriptorKey};
+use crate::expression::{self, FromTree};
+use crate::miniscript::context::{ScriptContext, ScriptContextError};
+use crate::miniscript::satisfy::{Placeholder, Satisfaction, Witness};
+use crate::plan::AssetProvider;
+use crate::policy::{semantic, Liftable};
+use crate::prelude::*;
+use crate::util::{varint_len, witness_to_scriptsig};
+use crate::{
+    BareCtx, Error, ForEachKey, FromStrKey, Miniscript, MiniscriptKey, Satisfier, ToPublicKey,
+    TranslateErr, Translator,
 };
 
 /// Create a Bare Descriptor. That is descriptor that is
@@ -49,127 +38,84 @@ impl<Pk: MiniscriptKey> Bare<Pk> {
     pub fn new(ms: Miniscript<Pk, BareCtx>) -> Result<Self, Error> {
         // do the top-level checks
         BareCtx::top_level_checks(&ms)?;
-        Ok(Self { ms: ms })
+        Ok(Self { ms })
     }
 
     /// get the inner
-    pub fn into_inner(self) -> Miniscript<Pk, BareCtx> {
-        self.ms
-    }
+    pub fn into_inner(self) -> Miniscript<Pk, BareCtx> { self.ms }
 
     /// get the inner
-    pub fn as_inner(&self) -> &Miniscript<Pk, BareCtx> {
-        &self.ms
-    }
-}
+    pub fn as_inner(&self) -> &Miniscript<Pk, BareCtx> { &self.ms }
 
-impl<Pk: MiniscriptKey + ToPublicKey> Bare<Pk> {
-    /// Obtain the corresponding script pubkey for this descriptor
-    /// Non failing verion of [`DescriptorTrait::script_pubkey`] for this descriptor
-    pub fn spk(&self) -> Script {
-        self.ms.encode()
-    }
-
-    /// Obtain the underlying miniscript for this descriptor
-    /// Non failing verion of [`DescriptorTrait::explicit_script`] for this descriptor
-    pub fn inner_script(&self) -> Script {
-        self.spk()
-    }
-
-    /// Obtain the pre bip-340 signature script code for this descriptor
-    /// Non failing verion of [`DescriptorTrait::script_code`] for this descriptor
-    pub fn ecdsa_sighash_script_code(&self) -> Script {
-        self.spk()
-    }
-}
-
-impl<Pk: MiniscriptKey> fmt::Debug for Bare<Pk> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.ms)
-    }
-}
-
-impl<Pk: MiniscriptKey> fmt::Display for Bare<Pk> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let desc = format!("{}", self.ms);
-        let checksum = desc_checksum(&desc).map_err(|_| fmt::Error)?;
-        write!(f, "{}#{}", &desc, &checksum)
-    }
-}
-
-impl<Pk: MiniscriptKey> Liftable<Pk> for Bare<Pk> {
-    fn lift(&self) -> Result<semantic::Policy<Pk>, Error> {
-        self.ms.lift()
-    }
-}
-
-impl<Pk> FromTree for Bare<Pk>
-where
-    Pk: MiniscriptKey + FromStr,
-    Pk::Hash: FromStr,
-    <Pk as FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as FromStr>::Err: ToString,
-{
-    fn from_tree(top: &expression::Tree) -> Result<Self, Error> {
-        let sub = Miniscript::<Pk, BareCtx>::from_tree(&top)?;
-        BareCtx::top_level_checks(&sub)?;
-        Bare::new(sub)
-    }
-}
-
-impl<Pk> FromStr for Bare<Pk>
-where
-    Pk: MiniscriptKey + FromStr,
-    Pk::Hash: FromStr,
-    <Pk as FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as FromStr>::Err: ToString,
-{
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let desc_str = verify_checksum(s)?;
-        let top = expression::Tree::from_str(desc_str)?;
-        Self::from_tree(&top)
-    }
-}
-
-impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Bare<Pk> {
-    fn sanity_check(&self) -> Result<(), Error> {
+    /// Checks whether the descriptor is safe.
+    pub fn sanity_check(&self) -> Result<(), Error> {
         self.ms.sanity_check()?;
         Ok(())
     }
 
-    fn address(&self, _network: bitcoin::Network) -> Result<bitcoin::Address, Error>
-    where
-        Pk: ToPublicKey,
-    {
-        Err(Error::BareDescriptorAddr)
+    /// Computes an upper bound on the difference between a non-satisfied
+    /// `TxIn`'s `segwit_weight` and a satisfied `TxIn`'s `segwit_weight`
+    ///
+    /// Since this method uses `segwit_weight` instead of `legacy_weight`,
+    /// if you want to include only legacy inputs in your transaction,
+    /// you should remove 1WU from each input's `max_weight_to_satisfy`
+    /// for a more accurate estimate.
+    ///
+    /// Assumes all ECDSA signatures are 73 bytes, including push opcode and
+    /// sighash suffix.
+    ///
+    /// # Errors
+    /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
+    pub fn max_weight_to_satisfy(&self) -> Result<Weight, Error> {
+        let scriptsig_size = self.ms.max_satisfaction_size()?;
+        // scriptSig varint difference between non-satisfied (0) and satisfied
+        let scriptsig_varint_diff = varint_len(scriptsig_size) - varint_len(0);
+        Weight::from_vb((scriptsig_varint_diff + scriptsig_size) as u64)
+            .ok_or(Error::CouldNotSatisfy)
     }
 
-    fn script_pubkey(&self) -> Script
-    where
-        Pk: ToPublicKey,
-    {
-        self.spk()
+    /// Computes an upper bound on the weight of a satisfying witness to the
+    /// transaction.
+    ///
+    /// Assumes all ec-signatures are 73 bytes, including push opcode and
+    /// sighash suffix. Includes the weight of the VarInts encoding the
+    /// scriptSig and witness stack length.
+    ///
+    /// # Errors
+    /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
+    #[deprecated(
+        since = "10.0.0",
+        note = "Use max_weight_to_satisfy instead. The method to count bytes was redesigned and the results will differ from max_weight_to_satisfy. For more details check rust-bitcoin/rust-miniscript#476."
+    )]
+    pub fn max_satisfaction_weight(&self) -> Result<usize, Error> {
+        let scriptsig_len = self.ms.max_satisfaction_size()?;
+        Ok(4 * (varint_len(scriptsig_len) + scriptsig_len))
     }
 
-    fn unsigned_script_sig(&self) -> Script
+    /// Converts the keys in the script from one type to another.
+    pub fn translate_pk<T>(&self, t: &mut T) -> Result<Bare<T::TargetPk>, TranslateErr<T::Error>>
     where
-        Pk: ToPublicKey,
+        T: Translator<Pk>,
     {
-        Script::new()
+        Bare::new(self.ms.translate_pk(t)?).map_err(TranslateErr::OuterError)
     }
+}
 
-    fn explicit_script(&self) -> Result<Script, Error>
-    where
-        Pk: ToPublicKey,
-    {
-        Ok(self.inner_script())
-    }
+impl<Pk: MiniscriptKey + ToPublicKey> Bare<Pk> {
+    /// Obtains the corresponding script pubkey for this descriptor.
+    pub fn script_pubkey(&self) -> ScriptBuf { self.ms.encode() }
 
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    /// Obtains the underlying miniscript for this descriptor.
+    pub fn inner_script(&self) -> ScriptBuf { self.script_pubkey() }
+
+    /// Obtains the pre bip-340 signature script code for this descriptor.
+    pub fn ecdsa_sighash_script_code(&self) -> ScriptBuf { self.script_pubkey() }
+
+    /// Returns satisfying non-malleable witness and scriptSig with minimum
+    /// weight to spend an output controlled by the given descriptor if it is
+    /// possible to construct one using the `satisfier`.
+    pub fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, ScriptBuf), Error>
     where
-        Pk: ToPublicKey,
         S: Satisfier<Pk>,
     {
         let ms = self.ms.satisfy(satisfier)?;
@@ -178,9 +124,11 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Bare<Pk> {
         Ok((witness, script_sig))
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    /// Returns satisfying, possibly malleable, witness and scriptSig with
+    /// minimum weight to spend an output controlled by the given descriptor if
+    /// it is possible to construct one using the `satisfier`.
+    pub fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, ScriptBuf), Error>
     where
-        Pk: ToPublicKey,
         S: Satisfier<Pk>,
     {
         let ms = self.ms.satisfy_malleable(satisfier)?;
@@ -188,48 +136,63 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Bare<Pk> {
         let witness = vec![];
         Ok((witness, script_sig))
     }
+}
 
-    fn max_satisfaction_weight(&self) -> Result<usize, Error> {
-        let scriptsig_len = self.ms.max_satisfaction_size()?;
-        Ok(4 * (varint_len(scriptsig_len) + scriptsig_len))
+impl Bare<DefiniteDescriptorKey> {
+    /// Returns a plan if the provided assets are sufficient to produce a non-malleable satisfaction
+    pub fn plan_satisfaction<P>(
+        &self,
+        provider: &P,
+    ) -> Satisfaction<Placeholder<DefiniteDescriptorKey>>
+    where
+        P: AssetProvider<DefiniteDescriptorKey>,
+    {
+        self.ms.build_template(provider)
     }
 
-    fn script_code(&self) -> Result<Script, Error>
+    /// Returns a plan if the provided assets are sufficient to produce a malleable satisfaction
+    pub fn plan_satisfaction_mall<P>(
+        &self,
+        provider: &P,
+    ) -> Satisfaction<Placeholder<DefiniteDescriptorKey>>
     where
-        Pk: ToPublicKey,
+        P: AssetProvider<DefiniteDescriptorKey>,
     {
-        Ok(self.ecdsa_sighash_script_code())
+        self.ms.build_template_mall(provider)
+    }
+}
+
+impl<Pk: MiniscriptKey> fmt::Debug for Bare<Pk> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{:?}", self.ms) }
+}
+
+impl<Pk: MiniscriptKey> fmt::Display for Bare<Pk> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write_descriptor!(f, "{}", self.ms) }
+}
+
+impl<Pk: MiniscriptKey> Liftable<Pk> for Bare<Pk> {
+    fn lift(&self) -> Result<semantic::Policy<Pk>, Error> { self.ms.lift() }
+}
+
+impl<Pk: FromStrKey> FromTree for Bare<Pk> {
+    fn from_tree(root: expression::TreeIterItem) -> Result<Self, Error> {
+        let sub = Miniscript::<Pk, BareCtx>::from_tree(root)?;
+        BareCtx::top_level_checks(&sub)?;
+        Bare::new(sub)
+    }
+}
+
+impl<Pk: FromStrKey> core::str::FromStr for Bare<Pk> {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let top = expression::Tree::from_str(s)?;
+        Self::from_tree(top.root())
     }
 }
 
 impl<Pk: MiniscriptKey> ForEachKey<Pk> for Bare<Pk> {
-    fn for_each_key<'a, F: FnMut(ForEach<'a, Pk>) -> bool>(&'a self, pred: F) -> bool
-    where
-        Pk: 'a,
-        Pk::Hash: 'a,
-    {
+    fn for_each_key<'a, F: FnMut(&'a Pk) -> bool>(&'a self, pred: F) -> bool {
         self.ms.for_each_key(pred)
-    }
-}
-
-impl<P: MiniscriptKey, Q: MiniscriptKey> TranslatePk<P, Q> for Bare<P> {
-    type Output = Bare<Q>;
-
-    fn translate_pk<Fpk, Fpkh, E>(
-        &self,
-        mut translatefpk: Fpk,
-        mut translatefpkh: Fpkh,
-    ) -> Result<Self::Output, E>
-    where
-        Fpk: FnMut(&P) -> Result<Q, E>,
-        Fpkh: FnMut(&P::Hash) -> Result<Q::Hash, E>,
-        Q: MiniscriptKey,
-    {
-        Ok(Bare::new(
-            self.ms
-                .translate_pk(&mut translatefpk, &mut translatefpkh)?,
-        )
-        .expect("Translation cannot fail inside Bare"))
     }
 }
 
@@ -242,149 +205,99 @@ pub struct Pkh<Pk: MiniscriptKey> {
 
 impl<Pk: MiniscriptKey> Pkh<Pk> {
     /// Create a new Pkh descriptor
-    pub fn new(pk: Pk) -> Self {
+    pub fn new(pk: Pk) -> Result<Self, ScriptContextError> {
         // do the top-level checks
-        Self { pk: pk }
+        match BareCtx::check_pk(&pk) {
+            Ok(()) => Ok(Pkh { pk }),
+            Err(e) => Err(e),
+        }
     }
 
     /// Get a reference to the inner key
-    pub fn as_inner(&self) -> &Pk {
-        &self.pk
-    }
+    pub fn as_inner(&self) -> &Pk { &self.pk }
 
     /// Get the inner key
-    pub fn into_inner(self) -> Pk {
-        self.pk
-    }
-}
+    pub fn into_inner(self) -> Pk { self.pk }
 
-impl<Pk: MiniscriptKey + ToPublicKey> Pkh<Pk> {
-    /// Obtain the corresponding script pubkey for this descriptor
-    /// Non failing verion of [`DescriptorTrait::script_pubkey`] for this descriptor
-    pub fn spk(&self) -> Script {
-        let addr = bitcoin::Address::p2pkh(&self.pk.to_public_key(), bitcoin::Network::Bitcoin);
-        addr.script_pubkey()
-    }
-
-    /// Obtain the corresponding script pubkey for this descriptor
-    /// Non failing verion of [`DescriptorTrait::address`] for this descriptor
-    pub fn addr(&self, network: bitcoin::Network) -> bitcoin::Address {
-        bitcoin::Address::p2pkh(&self.pk.to_public_key(), network)
-    }
-
-    /// Obtain the underlying miniscript for this descriptor
-    /// Non failing verion of [`DescriptorTrait::explicit_script`] for this descriptor
-    pub fn inner_script(&self) -> Script {
-        self.spk()
+    /// Computes an upper bound on the difference between a non-satisfied
+    /// `TxIn`'s `segwit_weight` and a satisfied `TxIn`'s `segwit_weight`
+    ///
+    /// Since this method uses `segwit_weight` instead of `legacy_weight`,
+    /// if you want to include only legacy inputs in your transaction,
+    /// you should remove 1WU from each input's `max_weight_to_satisfy`
+    /// for a more accurate estimate.
+    ///
+    /// Assumes all ECDSA signatures are 73 bytes, including push opcode and
+    /// sighash suffix.
+    ///
+    /// # Errors
+    /// When the descriptor is impossible to safisfy (ex: sh(OP_FALSE)).
+    pub fn max_weight_to_satisfy(&self) -> Weight {
+        // OP_72 + <sig(71)+sigHash(1)> + OP_33 + <pubkey>
+        let scriptsig_size = 73 + BareCtx::pk_len(&self.pk);
+        // scriptSig varint different between non-satisfied (0) and satisfied
+        let scriptsig_varint_diff = varint_len(scriptsig_size) - varint_len(0);
+        Weight::from_vb((scriptsig_varint_diff + scriptsig_size) as u64).unwrap()
     }
 
-    /// Obtain the pre bip-340 signature script code for this descriptor
-    /// Non failing verion of [`DescriptorTrait::script_code`] for this descriptor
-    pub fn ecdsa_sighash_script_code(&self) -> Script {
-        self.spk()
-    }
-}
+    /// Computes an upper bound on the weight of a satisfying witness to the
+    /// transaction.
+    ///
+    /// Assumes all ec-signatures are 73 bytes, including push opcode and
+    /// sighash suffix. Includes the weight of the VarInts encoding the
+    /// scriptSig and witness stack length.
+    #[deprecated(
+        since = "10.0.0",
+        note = "Use max_weight_to_satisfy instead. The method to count bytes was redesigned and the results will differ from max_weight_to_satisfy. For more details check rust-bitcoin/rust-miniscript#476."
+    )]
+    pub fn max_satisfaction_weight(&self) -> usize { 4 * (1 + 73 + BareCtx::pk_len(&self.pk)) }
 
-impl<Pk: MiniscriptKey> fmt::Debug for Pkh<Pk> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pkh({:?})", self.pk)
-    }
-}
-
-impl<Pk: MiniscriptKey> fmt::Display for Pkh<Pk> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let desc = format!("pkh({})", self.pk);
-        let checksum = desc_checksum(&desc).map_err(|_| fmt::Error)?;
-        write!(f, "{}#{}", &desc, &checksum)
-    }
-}
-
-impl<Pk: MiniscriptKey> Liftable<Pk> for Pkh<Pk> {
-    fn lift(&self) -> Result<semantic::Policy<Pk>, Error> {
-        Ok(semantic::Policy::KeyHash(self.pk.to_pubkeyhash()))
-    }
-}
-
-impl<Pk> FromTree for Pkh<Pk>
-where
-    Pk: MiniscriptKey + FromStr,
-    Pk::Hash: FromStr,
-    <Pk as FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as FromStr>::Err: ToString,
-{
-    fn from_tree(top: &expression::Tree) -> Result<Self, Error> {
-        if top.name == "pkh" && top.args.len() == 1 {
-            Ok(Pkh::new(expression::terminal(&top.args[0], |pk| {
-                Pk::from_str(pk)
-            })?))
-        } else {
-            Err(Error::Unexpected(format!(
-                "{}({} args) while parsing pkh descriptor",
-                top.name,
-                top.args.len(),
-            )))
+    /// Converts the keys in a script from one type to another.
+    pub fn translate_pk<T>(&self, t: &mut T) -> Result<Pkh<T::TargetPk>, TranslateErr<T::Error>>
+    where
+        T: Translator<Pk>,
+    {
+        let res = Pkh::new(t.pk(&self.pk)?);
+        match res {
+            Ok(pk) => Ok(pk),
+            Err(e) => Err(TranslateErr::OuterError(Error::from(e))),
         }
     }
 }
 
-impl<Pk> FromStr for Pkh<Pk>
-where
-    Pk: MiniscriptKey + FromStr,
-    Pk::Hash: FromStr,
-    <Pk as FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as FromStr>::Err: ToString,
-{
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let desc_str = verify_checksum(s)?;
-        let top = expression::Tree::from_str(desc_str)?;
-        Self::from_tree(&top)
-    }
-}
-
-impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Pkh<Pk> {
-    fn sanity_check(&self) -> Result<(), Error> {
-        Ok(())
+impl<Pk: MiniscriptKey + ToPublicKey> Pkh<Pk> {
+    /// Obtains the corresponding script pubkey for this descriptor.
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        // Fine to hard code the `Network` here because we immediately call
+        // `script_pubkey` which does not use the `network` field of `Address`.
+        let addr = self.address(Network::Bitcoin);
+        addr.script_pubkey()
     }
 
-    fn address(&self, network: bitcoin::Network) -> Result<bitcoin::Address, Error>
+    /// Obtains the corresponding script pubkey for this descriptor.
+    pub fn address(&self, network: Network) -> Address {
+        Address::p2pkh(self.pk.to_public_key(), network)
+    }
+
+    /// Obtains the underlying miniscript for this descriptor.
+    pub fn inner_script(&self) -> ScriptBuf { self.script_pubkey() }
+
+    /// Obtains the pre bip-340 signature script code for this descriptor.
+    pub fn ecdsa_sighash_script_code(&self) -> ScriptBuf { self.script_pubkey() }
+
+    /// Returns satisfying non-malleable witness and scriptSig with minimum
+    /// weight to spend an output controlled by the given descriptor if it is
+    /// possible to construct one using the `satisfier`.
+    pub fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, ScriptBuf), Error>
     where
-        Pk: ToPublicKey,
-    {
-        Ok(self.addr(network))
-    }
-
-    fn script_pubkey(&self) -> Script
-    where
-        Pk: ToPublicKey,
-    {
-        self.spk()
-    }
-
-    fn unsigned_script_sig(&self) -> Script
-    where
-        Pk: ToPublicKey,
-    {
-        Script::new()
-    }
-
-    fn explicit_script(&self) -> Result<Script, Error>
-    where
-        Pk: ToPublicKey,
-    {
-        Ok(self.inner_script())
-    }
-
-    fn get_satisfaction<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
-    where
-        Pk: ToPublicKey,
         S: Satisfier<Pk>,
     {
         if let Some(sig) = satisfier.lookup_ecdsa_sig(&self.pk) {
-            let sig_vec = sig.to_vec();
             let script_sig = script::Builder::new()
-                .push_slice(&sig_vec[..])
+                .push_slice::<&PushBytes>(
+                    // serialize() does not allocate here
+                    sig.serialize().as_ref(),
+                )
                 .push_key(&self.pk.to_public_key())
                 .into_script();
             let witness = vec![];
@@ -394,49 +307,84 @@ impl<Pk: MiniscriptKey> DescriptorTrait<Pk> for Pkh<Pk> {
         }
     }
 
-    fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, Script), Error>
+    /// Returns satisfying, possibly malleable, witness and scriptSig with
+    /// minimum weight to spend an output controlled by the given descriptor if
+    /// it is possible to construct one using the `satisfier`.
+    pub fn get_satisfaction_mall<S>(&self, satisfier: S) -> Result<(Vec<Vec<u8>>, ScriptBuf), Error>
     where
-        Pk: ToPublicKey,
         S: Satisfier<Pk>,
     {
         self.get_satisfaction(satisfier)
     }
+}
 
-    fn max_satisfaction_weight(&self) -> Result<usize, Error> {
-        Ok(4 * (1 + 73 + BareCtx::pk_len(&self.pk)))
+impl Pkh<DefiniteDescriptorKey> {
+    /// Returns a plan if the provided assets are sufficient to produce a non-malleable satisfaction
+    pub fn plan_satisfaction<P>(
+        &self,
+        provider: &P,
+    ) -> Satisfaction<Placeholder<DefiniteDescriptorKey>>
+    where
+        P: AssetProvider<DefiniteDescriptorKey>,
+    {
+        let stack = if provider.provider_lookup_ecdsa_sig(&self.pk) {
+            let stack = vec![
+                Placeholder::EcdsaSigPk(self.pk.clone()),
+                Placeholder::Pubkey(self.pk.clone(), BareCtx::pk_len(&self.pk)),
+            ];
+            Witness::Stack(stack)
+        } else {
+            Witness::Unavailable
+        };
+
+        Satisfaction { stack, has_sig: true, relative_timelock: None, absolute_timelock: None }
     }
 
-    fn script_code(&self) -> Result<Script, Error>
+    /// Returns a plan if the provided assets are sufficient to produce a malleable satisfaction
+    pub fn plan_satisfaction_mall<P>(
+        &self,
+        provider: &P,
+    ) -> Satisfaction<Placeholder<DefiniteDescriptorKey>>
     where
-        Pk: ToPublicKey,
+        P: AssetProvider<DefiniteDescriptorKey>,
     {
-        Ok(self.ecdsa_sighash_script_code())
+        self.plan_satisfaction(provider)
+    }
+}
+
+impl<Pk: MiniscriptKey> fmt::Debug for Pkh<Pk> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "pkh({:?})", self.pk) }
+}
+
+impl<Pk: MiniscriptKey> fmt::Display for Pkh<Pk> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write_descriptor!(f, "pkh({})", self.pk)
+    }
+}
+
+impl<Pk: MiniscriptKey> Liftable<Pk> for Pkh<Pk> {
+    fn lift(&self) -> Result<semantic::Policy<Pk>, Error> {
+        Ok(semantic::Policy::Key(self.pk.clone()))
+    }
+}
+
+impl<Pk: FromStrKey> FromTree for Pkh<Pk> {
+    fn from_tree(root: expression::TreeIterItem) -> Result<Self, Error> {
+        let pk = root
+            .verify_terminal_parent("pkh", "public key")
+            .map_err(Error::Parse)?;
+        Pkh::new(pk).map_err(Error::ContextError)
+    }
+}
+
+impl<Pk: FromStrKey> core::str::FromStr for Pkh<Pk> {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let top = expression::Tree::from_str(s)?;
+        Self::from_tree(top.root())
     }
 }
 
 impl<Pk: MiniscriptKey> ForEachKey<Pk> for Pkh<Pk> {
-    fn for_each_key<'a, F: FnMut(ForEach<'a, Pk>) -> bool>(&'a self, mut pred: F) -> bool
-    where
-        Pk: 'a,
-        Pk::Hash: 'a,
-    {
-        pred(ForEach::Key(&self.pk))
-    }
-}
-
-impl<P: MiniscriptKey, Q: MiniscriptKey> TranslatePk<P, Q> for Pkh<P> {
-    type Output = Pkh<Q>;
-
-    fn translate_pk<Fpk, Fpkh, E>(
-        &self,
-        mut translatefpk: Fpk,
-        _translatefpkh: Fpkh,
-    ) -> Result<Self::Output, E>
-    where
-        Fpk: FnMut(&P) -> Result<Q, E>,
-        Fpkh: FnMut(&P::Hash) -> Result<Q::Hash, E>,
-        Q: MiniscriptKey,
-    {
-        Ok(Pkh::new(translatefpk(&self.pk)?))
-    }
+    fn for_each_key<'a, F: FnMut(&'a Pk) -> bool>(&'a self, mut pred: F) -> bool { pred(&self.pk) }
 }

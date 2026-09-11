@@ -1,51 +1,36 @@
-// Miniscript
-// Written in 2019 by
-//     Andrew Poelstra <apoelstra@wpsoftware.net>
-//
-// To the extent possible under law, the author(s) have dedicated all
-// copyright and related and neighboring rights to this software to
-// the public domain worldwide. This software is distributed without
-// any warranty.
-//
-// You should have received a copy of the CC0 Public Domain Dedication
-// along with this software.
-// If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
-//
+// SPDX-License-Identifier: CC0-1.0
 
 //! # Policy Compiler
 //!
 //! Optimizing compiler from concrete policies to Miniscript
 //!
 
-use std::collections::BTreeMap;
-use std::convert::From;
-use std::marker::PhantomData;
-use std::{cmp, error, f64, fmt, mem};
+use core::{cmp, f64, fmt, hash, mem};
+#[cfg(feature = "std")]
+use std::error;
 
-use miniscript::limits::MAX_PUBKEYS_PER_MULTISIG;
-use miniscript::types::{self, ErrorKind, ExtData, Property, Type};
-use miniscript::ScriptContext;
-use policy::Concrete;
-use std::collections::vec_deque::VecDeque;
-use std::hash;
-use std::sync::Arc;
-use {policy, Terminal};
-use {Miniscript, MiniscriptKey};
+use sync::Arc;
+
+use crate::miniscript::context::SigType;
+use crate::miniscript::types::{self, ErrorKind, ExtData, Type};
+use crate::miniscript::ScriptContext;
+use crate::policy::Concrete;
+use crate::prelude::*;
+use crate::{policy, Miniscript, MiniscriptKey, Terminal};
 
 type PolicyCache<Pk, Ctx> =
     BTreeMap<(Concrete<Pk>, OrdF64, Option<OrdF64>), BTreeMap<CompilationKey, AstElemExt<Pk, Ctx>>>;
 
-///Ordered f64 for comparison
+/// Ordered f64 for comparison.
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct OrdF64(f64);
+pub(crate) struct OrdF64(pub f64);
 
 impl Eq for OrdF64 {}
+// We could derive PartialOrd, but we can't derive Ord, and clippy wants us
+// to derive both or neither. Better to be explicit.
 impl PartialOrd for OrdF64 {
-    fn partial_cmp(&self, other: &OrdF64) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &OrdF64) -> Option<cmp::Ordering> { Some(self.cmp(other)) }
 }
-
 impl Ord for OrdF64 {
     fn cmp(&self, other: &OrdF64) -> cmp::Ordering {
         // will panic if given NaN
@@ -53,9 +38,13 @@ impl Ord for OrdF64 {
     }
 }
 
-/// Detailed Error type for Compiler
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// Detailed error type for compiler.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum CompilerError {
+    /// `And` fragments only support two args.
+    NonBinaryArgAnd,
+    /// `Or` fragments only support two args.
+    NonBinaryArgOr,
     /// Compiler has non-safe input policy.
     TopLevelNonSafe,
     /// Non-Malleable compilation  does exists for the given sub-policy.
@@ -65,15 +54,29 @@ pub enum CompilerError {
     /// There may exist other miniscripts which are under these limits but the
     /// compiler currently does not find them.
     LimitsExceeded,
+    /// In a Taproot compilation, no "unspendable key" was provided and no in-policy
+    /// key could be used as an internal key.
+    NoInternalKey,
+    /// When compiling to Taproot, policy had too many Tapleaves
+    TooManyTapleaves {
+        /// Number of Tapleaves inferred from the policy.
+        n: usize,
+        /// Maximum allowed number of Tapleaves.
+        max: usize,
+    },
     ///Policy related errors
     PolicyError(policy::concrete::PolicyError),
 }
 
-impl error::Error for CompilerError {}
-
 impl fmt::Display for CompilerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            CompilerError::NonBinaryArgAnd => {
+                f.write_str("And policy fragment must take 2 arguments")
+            }
+            CompilerError::NonBinaryArgOr => {
+                f.write_str("Or policy fragment must take 2 arguments")
+            }
             CompilerError::TopLevelNonSafe => {
                 f.write_str("Top Level script is not safe on some spendpath")
             }
@@ -83,30 +86,48 @@ impl fmt::Display for CompilerError {
             CompilerError::LimitsExceeded => f.write_str(
                 "At least one spending path has exceeded the standardness or consensus limits",
             ),
+            CompilerError::NoInternalKey => {
+                f.write_str("Taproot compilation had no internal key available")
+            }
+            CompilerError::TooManyTapleaves { n, max } => {
+                write!(f, "Policy had too many Tapleaves (found {}, maximum {})", n, max)
+            }
             CompilerError::PolicyError(ref e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl error::Error for CompilerError {
+    fn cause(&self) -> Option<&dyn error::Error> {
+        use self::CompilerError::*;
+
+        match self {
+            NonBinaryArgAnd
+            | NonBinaryArgOr
+            | TopLevelNonSafe
+            | ImpossibleNonMalleableCompilation
+            | LimitsExceeded
+            | NoInternalKey
+            | TooManyTapleaves { .. } => None,
+            PolicyError(e) => Some(e),
         }
     }
 }
 
 #[doc(hidden)]
 impl From<policy::concrete::PolicyError> for CompilerError {
-    fn from(e: policy::concrete::PolicyError) -> CompilerError {
-        CompilerError::PolicyError(e)
-    }
+    fn from(e: policy::concrete::PolicyError) -> CompilerError { CompilerError::PolicyError(e) }
 }
 
 /// Hash required for using OrdF64 as key for hashmap
 impl hash::Hash for OrdF64 {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        // Floating-point equality treats positive and negative zero as equal.
-        let bits = if self.0 == 0.0 { 0 } else { self.0.to_bits() };
-        bits.hash(state);
-    }
+    fn hash<H: hash::Hasher>(&self, state: &mut H) { self.0.to_bits().hash(state); }
 }
 
 /// Compilation key: This represents the state of the best possible compilation
 /// of a given policy(implicitly keyed).
-#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
 struct CompilationKey {
     /// The type of the compilation result
     ty: Type,
@@ -135,11 +156,7 @@ impl CompilationKey {
 
     /// Helper to create compilation key from components
     fn from_type(ty: Type, expensive_verify: bool, dissat_prob: Option<f64>) -> CompilationKey {
-        CompilationKey {
-            ty,
-            expensive_verify,
-            dissat_prob: dissat_prob.and_then(|x| Some(OrdF64(x))),
-        }
+        CompilationKey { ty, expensive_verify, dissat_prob: dissat_prob.map(OrdF64) }
     }
 }
 
@@ -158,40 +175,40 @@ struct CompilerExtData {
     dissat_cost: Option<f64>,
 }
 
-impl Property for CompilerExtData {
-    fn from_true() -> Self {
-        CompilerExtData {
-            branch_prob: None,
-            sat_cost: 0.0,
-            dissat_cost: None,
-        }
-    }
+impl CompilerExtData {
+    const TRUE: Self = CompilerExtData { branch_prob: None, sat_cost: 0.0, dissat_cost: None };
 
-    fn from_false() -> Self {
-        CompilerExtData {
-            branch_prob: None,
-            sat_cost: f64::MAX,
-            dissat_cost: Some(0.0),
-        }
-    }
+    const FALSE: Self =
+        CompilerExtData { branch_prob: None, sat_cost: f64::MAX, dissat_cost: Some(0.0) };
 
-    fn from_pk_k() -> Self {
+    fn pk_k<Ctx: ScriptContext>() -> Self {
         CompilerExtData {
             branch_prob: None,
-            sat_cost: 73.0,
+            sat_cost: match Ctx::sig_type() {
+                SigType::Ecdsa => 73.0,
+                SigType::Schnorr => 1.0 /* <var_int> */ + 64.0 /* sig */ + 1.0, /* <sighash_type> */
+            },
             dissat_cost: Some(1.0),
         }
     }
 
-    fn from_pk_h() -> Self {
+    fn pk_h<Ctx: ScriptContext>() -> Self {
         CompilerExtData {
             branch_prob: None,
-            sat_cost: 73.0 + 34.0,
-            dissat_cost: Some(1.0 + 34.0),
+            sat_cost: match Ctx::sig_type() {
+                SigType::Ecdsa => 73.0 + 34.0,
+                SigType::Schnorr => 66.0 + 33.0,
+            },
+            dissat_cost: Some(
+                1.0 + match Ctx::sig_type() {
+                    SigType::Ecdsa => 34.0,
+                    SigType::Schnorr => 33.0,
+                },
+            ),
         }
     }
 
-    fn from_multi(k: usize, _n: usize) -> Self {
+    fn multi(k: usize, _n: usize) -> Self {
         CompilerExtData {
             branch_prob: None,
             sat_cost: 1.0 + 73.0 * k as f64,
@@ -199,191 +216,147 @@ impl Property for CompilerExtData {
         }
     }
 
-    fn from_hash() -> Self {
+    fn multi_a(k: usize, n: usize) -> Self {
         CompilerExtData {
             branch_prob: None,
-            sat_cost: 33.0,
-            dissat_cost: Some(33.0),
-        }
-    }
-    fn inscribing(
-        inscription: &Arc<Vec<crate::ord::Inscription>>,
-        code: Self,
-    ) -> Result<Self, ErrorKind> {
-        Ok(code)
-    }
-
-    fn from_time(_t: u32) -> Self {
-        CompilerExtData {
-            branch_prob: None,
-            sat_cost: 0.0,
-            dissat_cost: None,
+            sat_cost: 66.0 * k as f64 + (n - k) as f64,
+            dissat_cost: Some(n as f64), /* <w_n> ... <w_1> := 0x00 ... 0x00 (n times) */
         }
     }
 
-    fn from_txtemplate() -> Self {
+    fn hash() -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: 33.0, dissat_cost: Some(33.0) }
+    }
+
+    fn time() -> Self { CompilerExtData { branch_prob: None, sat_cost: 0.0, dissat_cost: None } }
+
+    fn cast_alt(self) -> Self {
         CompilerExtData {
             branch_prob: None,
-            sat_cost: 0.0,
-            dissat_cost: None,
+            sat_cost: self.sat_cost,
+            dissat_cost: self.dissat_cost,
         }
     }
 
-    fn cast_alt(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
+    fn cast_swap(self) -> Self {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: self.sat_cost,
             dissat_cost: self.dissat_cost,
-        })
+        }
     }
 
-    fn cast_swap(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
+    fn cast_check(self) -> Self {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: self.sat_cost,
             dissat_cost: self.dissat_cost,
-        })
+        }
     }
 
-    fn cast_check(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
+    fn cast_dupif(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: 2.0 + self.sat_cost, dissat_cost: Some(1.0) }
+    }
+
+    fn cast_verify(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: self.sat_cost, dissat_cost: None }
+    }
+
+    fn cast_nonzero(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: self.sat_cost, dissat_cost: Some(1.0) }
+    }
+
+    fn cast_zeronotequal(self) -> Self {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: self.sat_cost,
             dissat_cost: self.dissat_cost,
-        })
+        }
     }
 
-    fn cast_dupif(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: 2.0 + self.sat_cost,
-            dissat_cost: Some(1.0),
-        })
+    fn cast_true(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: self.sat_cost, dissat_cost: None }
     }
 
-    fn cast_verify(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: self.sat_cost,
-            dissat_cost: None,
-        })
+    fn cast_unlikely(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: 2.0 + self.sat_cost, dissat_cost: Some(1.0) }
     }
 
-    fn cast_nonzero(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: self.sat_cost,
-            dissat_cost: Some(1.0),
-        })
+    fn cast_likely(self) -> Self {
+        CompilerExtData { branch_prob: None, sat_cost: 1.0 + self.sat_cost, dissat_cost: Some(2.0) }
     }
 
-    fn cast_zeronotequal(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: self.sat_cost,
-            dissat_cost: self.dissat_cost,
-        })
-    }
-
-    fn cast_true(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: self.sat_cost,
-            dissat_cost: None,
-        })
-    }
-
-    fn cast_or_i_false(self) -> Result<Self, types::ErrorKind> {
-        // never called directly
-        unreachable!()
-    }
-
-    fn cast_unlikely(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: 2.0 + self.sat_cost,
-            dissat_cost: Some(1.0),
-        })
-    }
-
-    fn cast_likely(self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: 1.0 + self.sat_cost,
-            dissat_cost: Some(2.0),
-        })
-    }
-
-    fn and_b(left: Self, right: Self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
+    fn and_b(left: Self, right: Self) -> Self {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: left.sat_cost + right.sat_cost,
             dissat_cost: match (left.dissat_cost, right.dissat_cost) {
                 (Some(l), Some(r)) => Some(l + r),
                 _ => None,
             },
-        })
+        }
     }
 
-    fn and_v(left: Self, right: Self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
+    fn and_v(left: Self, right: Self) -> Self {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: left.sat_cost + right.sat_cost,
             dissat_cost: None,
-        })
+        }
     }
 
-    fn or_b(l: Self, r: Self) -> Result<Self, types::ErrorKind> {
+    fn or_b(l: Self, r: Self) -> Self {
         let lprob = l
             .branch_prob
             .expect("BUG: left branch prob must be set for disjunctions");
         let rprob = r
             .branch_prob
             .expect("BUG: right branch prob must be set for disjunctions");
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: lprob * (l.sat_cost + r.dissat_cost.unwrap())
                 + rprob * (r.sat_cost + l.dissat_cost.unwrap()),
             dissat_cost: Some(l.dissat_cost.unwrap() + r.dissat_cost.unwrap()),
-        })
+        }
     }
 
-    fn or_d(l: Self, r: Self) -> Result<Self, types::ErrorKind> {
+    fn or_d(l: Self, r: Self) -> Self {
         let lprob = l
             .branch_prob
             .expect("BUG: left branch prob must be set for disjunctions");
         let rprob = r
             .branch_prob
             .expect("BUG: right branch prob must be set for disjunctions");
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: lprob * l.sat_cost + rprob * (r.sat_cost + l.dissat_cost.unwrap()),
             dissat_cost: r.dissat_cost.map(|rd| l.dissat_cost.unwrap() + rd),
-        })
+        }
     }
 
-    fn or_c(l: Self, r: Self) -> Result<Self, types::ErrorKind> {
+    fn or_c(l: Self, r: Self) -> Self {
         let lprob = l
             .branch_prob
             .expect("BUG: left branch prob must be set for disjunctions");
         let rprob = r
             .branch_prob
             .expect("BUG: right branch prob must be set for disjunctions");
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: lprob * l.sat_cost + rprob * (r.sat_cost + l.dissat_cost.unwrap()),
             dissat_cost: None,
-        })
+        }
     }
 
-    fn or_i(l: Self, r: Self) -> Result<Self, types::ErrorKind> {
+    #[allow(clippy::manual_map)] // Complex if/let is better as is.
+    fn or_i(l: Self, r: Self) -> Self {
         let lprob = l
             .branch_prob
             .expect("BUG: left branch prob must be set for disjunctions");
         let rprob = r
             .branch_prob
             .expect("BUG: right branch prob must be set for disjunctions");
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: lprob * (2.0 + l.sat_cost) + rprob * (1.0 + r.sat_cost),
             dissat_cost: if let (Some(ldis), Some(rdis)) = (l.dissat_cost, r.dissat_cost) {
@@ -399,13 +372,10 @@ impl Property for CompilerExtData {
             } else {
                 None
             },
-        })
+        }
     }
 
-    fn and_or(a: Self, b: Self, c: Self) -> Result<Self, types::ErrorKind> {
-        if a.dissat_cost.is_none() {
-            return Err(ErrorKind::LeftNotDissatisfiable);
-        }
+    fn and_or(a: Self, b: Self, c: Self) -> Self {
         let aprob = a.branch_prob.expect("andor, a prob must be set");
         let bprob = b.branch_prob.expect("andor, b prob must be set");
         let cprob = c.branch_prob.expect("andor, c prob must be set");
@@ -414,42 +384,131 @@ impl Property for CompilerExtData {
             .dissat_cost
             .expect("BUG: and_or first arg(a) must be dissatisfiable");
         debug_assert_eq!(aprob, bprob); //A and B must have same branch prob.
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: aprob * (a.sat_cost + b.sat_cost) + cprob * (adis + c.sat_cost),
-            dissat_cost: if let Some(cdis) = c.dissat_cost {
-                Some(adis + cdis)
-            } else {
-                None
-            },
-        })
+            dissat_cost: c.dissat_cost.map(|cdis| adis + cdis),
+        }
     }
 
-    fn and_n(a: Self, b: Self) -> Result<Self, types::ErrorKind> {
-        Ok(CompilerExtData {
-            branch_prob: None,
-            sat_cost: a.sat_cost + b.sat_cost,
-            dissat_cost: a.dissat_cost,
-        })
-    }
-
-    fn threshold<S>(k: usize, n: usize, mut sub_ck: S) -> Result<Self, types::ErrorKind>
+    fn threshold<S>(k: usize, n: usize, mut sub_ck: S) -> Self
     where
-        S: FnMut(usize) -> Result<Self, types::ErrorKind>,
+        S: FnMut(usize) -> Self,
     {
         let k_over_n = k as f64 / n as f64;
         let mut sat_cost = 0.0;
         let mut dissat_cost = 0.0;
         for i in 0..n {
-            let sub = sub_ck(i)?;
+            let sub = sub_ck(i);
             sat_cost += sub.sat_cost;
             dissat_cost += sub.dissat_cost.unwrap();
         }
-        Ok(CompilerExtData {
+        CompilerExtData {
             branch_prob: None,
             sat_cost: sat_cost * k_over_n + dissat_cost * (1.0 - k_over_n),
             dissat_cost: Some(dissat_cost),
-        })
+        }
+    }
+}
+
+impl CompilerExtData {
+    /// Compute the type of a fragment, given a function to look up
+    /// the types of its children.
+    fn type_check_with_child<Pk, Ctx, C>(fragment: &Terminal<Pk, Ctx>, child: C) -> Self
+    where
+        C: Fn(usize) -> Self,
+        Pk: MiniscriptKey,
+        Ctx: ScriptContext,
+    {
+        let get_child = |_sub, n| child(n);
+        Self::type_check_common(fragment, get_child)
+    }
+
+    /// Compute the type of a fragment.
+    fn type_check<Pk, Ctx>(fragment: &Terminal<Pk, Ctx>) -> Self
+    where
+        Pk: MiniscriptKey,
+        Ctx: ScriptContext,
+    {
+        let check_child = |sub, _n| Self::type_check(sub);
+        Self::type_check_common(fragment, check_child)
+    }
+
+    /// Compute the type of a fragment, given a function to look up
+    /// the types of its children, if available and relevant for the
+    /// given fragment
+    fn type_check_common<'a, Pk, Ctx, C>(fragment: &'a Terminal<Pk, Ctx>, get_child: C) -> Self
+    where
+        C: Fn(&'a Terminal<Pk, Ctx>, usize) -> Self,
+        Pk: MiniscriptKey,
+        Ctx: ScriptContext,
+    {
+        match *fragment {
+            Terminal::True => Self::TRUE,
+            Terminal::False => Self::FALSE,
+            Terminal::PkK(..) => Self::pk_k::<Ctx>(),
+            Terminal::PkH(..) | Terminal::RawPkH(..) => Self::pk_h::<Ctx>(),
+            Terminal::Multi(ref thresh) => Self::multi(thresh.k(), thresh.n()),
+            Terminal::MultiA(ref thresh) => Self::multi_a(thresh.k(), thresh.n()),
+            Terminal::After(_) => Self::time(),
+            Terminal::Older(_) => Self::time(),
+            Terminal::Sha256(..) => Self::hash(),
+            Terminal::Hash256(..) => Self::hash(),
+            Terminal::TxTemplate(..) => {
+                Self { branch_prob: None, sat_cost: 0.0, dissat_cost: None }
+            }
+            Terminal::Ripemd160(..) => Self::hash(),
+            Terminal::Hash160(..) => Self::hash(),
+            Terminal::InscribePre(_, ref sub) | Terminal::InscribePost(_, ref sub) => {
+                get_child(&sub.node, 0)
+            }
+            Terminal::Alt(ref sub) => Self::cast_alt(get_child(&sub.node, 0)),
+            Terminal::Swap(ref sub) => Self::cast_swap(get_child(&sub.node, 0)),
+            Terminal::Check(ref sub) => Self::cast_check(get_child(&sub.node, 0)),
+            Terminal::DupIf(ref sub) => Self::cast_dupif(get_child(&sub.node, 0)),
+            Terminal::Verify(ref sub) => Self::cast_verify(get_child(&sub.node, 0)),
+            Terminal::NonZero(ref sub) => Self::cast_nonzero(get_child(&sub.node, 0)),
+            Terminal::ZeroNotEqual(ref sub) => Self::cast_zeronotequal(get_child(&sub.node, 0)),
+            Terminal::AndB(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::and_b(ltype, rtype)
+            }
+            Terminal::AndV(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::and_v(ltype, rtype)
+            }
+            Terminal::OrB(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::or_b(ltype, rtype)
+            }
+            Terminal::OrD(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::or_d(ltype, rtype)
+            }
+            Terminal::OrC(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::or_c(ltype, rtype)
+            }
+            Terminal::OrI(ref l, ref r) => {
+                let ltype = get_child(&l.node, 0);
+                let rtype = get_child(&r.node, 1);
+                Self::or_i(ltype, rtype)
+            }
+            Terminal::AndOr(ref a, ref b, ref c) => {
+                let atype = get_child(&a.node, 0);
+                let btype = get_child(&b.node, 1);
+                let ctype = get_child(&c.node, 2);
+                Self::and_or(atype, btype, ctype)
+            }
+            Terminal::Thresh(ref thresh) => {
+                Self::threshold(thresh.k(), thresh.n(), |n| get_child(&thresh.data()[n].node, n))
+            }
+        }
     }
 }
 
@@ -479,35 +538,27 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> AstElemExt<Pk, Ctx> {
 }
 
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> AstElemExt<Pk, Ctx> {
-    fn terminal(ast: Terminal<Pk, Ctx>) -> AstElemExt<Pk, Ctx> {
-        AstElemExt {
-            comp_ext_data: CompilerExtData::type_check(&ast, |_| None).unwrap(),
-            ms: Arc::new(Miniscript::from_ast(ast).expect("Terminal creation must always succeed")),
-        }
+    fn terminal(ms: Miniscript<Pk, Ctx>) -> AstElemExt<Pk, Ctx> {
+        AstElemExt { comp_ext_data: CompilerExtData::type_check(ms.as_inner()), ms: Arc::new(ms) }
     }
 
     fn binary(
         ast: Terminal<Pk, Ctx>,
         l: &AstElemExt<Pk, Ctx>,
         r: &AstElemExt<Pk, Ctx>,
-    ) -> Result<AstElemExt<Pk, Ctx>, types::Error<Pk, Ctx>> {
+    ) -> Result<AstElemExt<Pk, Ctx>, types::Error> {
         let lookup_ext = |n| match n {
-            0 => Some(l.comp_ext_data),
-            1 => Some(r.comp_ext_data),
+            0 => l.comp_ext_data,
+            1 => r.comp_ext_data,
             _ => unreachable!(),
         };
         //Types and ExtData are already cached and stored in children. So, we can
         //type_check without cache. For Compiler extra data, we supply a cache.
-        let ty = types::Type::type_check(&ast, |_| None)?;
-        let ext = types::ExtData::type_check(&ast, |_| None)?;
-        let comp_ext_data = CompilerExtData::type_check(&ast, lookup_ext)?;
+        let ty = types::Type::type_check(&ast)?;
+        let ext = types::ExtData::type_check(&ast);
+        let comp_ext_data = CompilerExtData::type_check_with_child(&ast, lookup_ext);
         Ok(AstElemExt {
-            ms: Arc::new(Miniscript {
-                ty,
-                ext,
-                node: ast,
-                phantom: PhantomData,
-            }),
+            ms: Arc::new(Miniscript::from_components_unchecked(ast, ty, ext)),
             comp_ext_data,
         })
     }
@@ -517,49 +568,44 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> AstElemExt<Pk, Ctx> {
         a: &AstElemExt<Pk, Ctx>,
         b: &AstElemExt<Pk, Ctx>,
         c: &AstElemExt<Pk, Ctx>,
-    ) -> Result<AstElemExt<Pk, Ctx>, types::Error<Pk, Ctx>> {
+    ) -> Result<AstElemExt<Pk, Ctx>, types::Error> {
         let lookup_ext = |n| match n {
-            0 => Some(a.comp_ext_data),
-            1 => Some(b.comp_ext_data),
-            2 => Some(c.comp_ext_data),
+            0 => a.comp_ext_data,
+            1 => b.comp_ext_data,
+            2 => c.comp_ext_data,
             _ => unreachable!(),
         };
         //Types and ExtData are already cached and stored in children. So, we can
         //type_check without cache. For Compiler extra data, we supply a cache.
-        let ty = types::Type::type_check(&ast, |_| None)?;
-        let ext = types::ExtData::type_check(&ast, |_| None)?;
-        let comp_ext_data = CompilerExtData::type_check(&ast, lookup_ext)?;
+        let ty = types::Type::type_check(&ast)?;
+        let ext = types::ExtData::type_check(&ast);
+        let comp_ext_data = CompilerExtData::type_check_with_child(&ast, lookup_ext);
         Ok(AstElemExt {
-            ms: Arc::new(Miniscript {
-                ty: ty,
-                ext: ext,
-                node: ast,
-                phantom: PhantomData,
-            }),
+            ms: Arc::new(Miniscript::from_components_unchecked(ast, ty, ext)),
             comp_ext_data,
         })
     }
 }
 
 /// Different types of casts possible for each node.
+#[allow(clippy::type_complexity)]
 #[derive(Copy, Clone)]
 struct Cast<Pk: MiniscriptKey, Ctx: ScriptContext> {
     node: fn(Arc<Miniscript<Pk, Ctx>>) -> Terminal<Pk, Ctx>,
     ast_type: fn(types::Type) -> Result<types::Type, ErrorKind>,
-    ext_data: fn(types::ExtData) -> Result<types::ExtData, ErrorKind>,
-    comp_ext_data: fn(CompilerExtData) -> Result<CompilerExtData, types::ErrorKind>,
+    ext_data: fn(types::ExtData) -> types::ExtData,
+    comp_ext_data: fn(CompilerExtData) -> CompilerExtData,
 }
 
 impl<Pk: MiniscriptKey, Ctx: ScriptContext> Cast<Pk, Ctx> {
     fn cast(&self, ast: &AstElemExt<Pk, Ctx>) -> Result<AstElemExt<Pk, Ctx>, ErrorKind> {
         Ok(AstElemExt {
-            ms: Arc::new(Miniscript {
-                ty: (self.ast_type)(ast.ms.ty)?,
-                ext: (self.ext_data)(ast.ms.ext)?,
-                node: (self.node)(Arc::clone(&ast.ms)),
-                phantom: PhantomData,
-            }),
-            comp_ext_data: (self.comp_ext_data)(ast.comp_ext_data)?,
+            ms: Arc::new(Miniscript::from_components_unchecked(
+                (self.node)(Arc::clone(&ast.ms)),
+                (self.ast_type)(ast.ms.ty)?,
+                (self.ext_data)(ast.ms.ext),
+            )),
+            comp_ext_data: (self.comp_ext_data)(ast.comp_ext_data),
         })
     }
 }
@@ -580,27 +626,13 @@ fn all_casts<Pk: MiniscriptKey, Ctx: ScriptContext>() -> [Cast<Pk, Ctx>; 10] {
         },
         Cast {
             ext_data: types::ExtData::cast_likely,
-            node: |ms| {
-                Terminal::OrI(
-                    Arc::new(
-                        Miniscript::from_ast(Terminal::False).expect("False Miniscript creation"),
-                    ),
-                    ms,
-                )
-            },
+            node: |ms| Terminal::OrI(Arc::new(Miniscript::FALSE), ms),
             ast_type: types::Type::cast_likely,
             comp_ext_data: CompilerExtData::cast_likely,
         },
         Cast {
             ext_data: types::ExtData::cast_unlikely,
-            node: |ms| {
-                Terminal::OrI(
-                    ms,
-                    Arc::new(
-                        Miniscript::from_ast(Terminal::False).expect("False Miniscript creation"),
-                    ),
-                )
-            },
+            node: |ms| Terminal::OrI(ms, Arc::new(Miniscript::FALSE)),
             ast_type: types::Type::cast_unlikely,
             comp_ext_data: CompilerExtData::cast_unlikely,
         },
@@ -618,14 +650,7 @@ fn all_casts<Pk: MiniscriptKey, Ctx: ScriptContext>() -> [Cast<Pk, Ctx>; 10] {
         },
         Cast {
             ext_data: types::ExtData::cast_true,
-            node: |ms| {
-                Terminal::AndV(
-                    ms,
-                    Arc::new(
-                        Miniscript::from_ast(Terminal::True).expect("True Miniscript creation"),
-                    ),
-                )
-            },
+            node: |ms| Terminal::AndV(ms, Arc::new(Miniscript::TRUE)),
             ast_type: types::Type::cast_true,
             comp_ext_data: CompilerExtData::cast_true,
         },
@@ -664,13 +689,14 @@ fn insert_elem<Pk: MiniscriptKey, Ctx: ScriptContext>(
     sat_prob: f64,
     dissat_prob: Option<f64>,
 ) -> bool {
-    // return malleable types directly. If a elem is malleable under current context,
-    // all the casts to it are also going to be malleable
-    if !elem.ms.ty.mall.non_malleable && Ctx::check_terminal_non_malleable(&elem.ms.node).is_ok() {
+    // We check before compiling that non-malleable satisfactions exist, and it appears that
+    // there are no cases when malleable satisfactions beat non-malleable ones (and if there
+    // are, we don't want to use them). Anyway, detect these and early return.
+    if !elem.ms.ty.mall.non_malleable {
         return false;
     }
 
-    if let Err(_) = Ctx::check_local_validity(&elem.ms) {
+    if Ctx::check_local_validity(&elem.ms).is_err() {
         return false;
     }
 
@@ -681,19 +707,16 @@ fn insert_elem<Pk: MiniscriptKey, Ctx: ScriptContext>(
     // Check whether the new element is worse than any existing element. If there
     // is an element which is a subtype of the current element and has better
     // cost, don't consider this element.
-    let is_worse = map
-        .iter()
-        .map(|(existing_key, existing_elem)| {
-            let existing_elem_cost = existing_elem.cost_1d(sat_prob, dissat_prob);
-            existing_key.is_subtype(elem_key) && existing_elem_cost <= elem_cost
-        })
-        .fold(false, |acc, x| acc || x);
+    let is_worse = map.iter().any(|(existing_key, existing_elem)| {
+        let existing_elem_cost = existing_elem.cost_1d(sat_prob, dissat_prob);
+        existing_key.is_subtype(elem_key) && existing_elem_cost <= elem_cost
+    });
     if !is_worse {
         // If the element is not worse any element in the map, remove elements
         // whose subtype is the current element and have worse cost.
-        *map = mem::replace(map, BTreeMap::new())
+        *map = mem::take(map)
             .into_iter()
-            .filter(|&(ref existing_key, ref existing_elem)| {
+            .filter(|(existing_key, existing_elem)| {
                 let existing_elem_cost = existing_elem.cost_1d(sat_prob, dissat_prob);
                 !(elem_key.is_subtype(*existing_key) && existing_elem_cost >= elem_cost)
             })
@@ -720,15 +743,14 @@ fn insert_elem_closure<Pk: MiniscriptKey, Ctx: ScriptContext>(
     let mut cast_stack: VecDeque<AstElemExt<Pk, Ctx>> = VecDeque::new();
     if insert_elem(map, astelem_ext.clone(), sat_prob, dissat_prob) {
         cast_stack.push_back(astelem_ext);
-    } else {
     }
 
     let casts: [Cast<Pk, Ctx>; 10] = all_casts::<Pk, Ctx>();
     while !cast_stack.is_empty() {
         let current = cast_stack.pop_front().unwrap();
 
-        for i in 0..casts.len() {
-            if let Ok(new_ext) = casts[i].cast(&current) {
+        for c in &casts {
+            if let Ok(new_ext) = c.cast(&current) {
                 if insert_elem(map, new_ext.clone(), sat_prob, dissat_prob) {
                     cast_stack.push_back(new_ext);
                 }
@@ -759,9 +781,9 @@ fn insert_best_wrapped<Pk: MiniscriptKey, Ctx: ScriptContext>(
     if dissat_prob.is_some() {
         let casts: [Cast<Pk, Ctx>; 10] = all_casts::<Pk, Ctx>();
 
-        for i in 0..casts.len() {
+        for c in &casts {
             for x in best_compilations(policy_cache, policy, sat_prob, None)?.values() {
-                if let Ok(new_ext) = casts[i].cast(x) {
+                if let Ok(new_ext) = c.cast(x) {
                     insert_elem_closure(map, new_ext, sat_prob, dissat_prob);
                 }
             }
@@ -784,7 +806,7 @@ where
 {
     //Check the cache for hits
     let ord_sat_prob = OrdF64(sat_prob);
-    let ord_dissat_prob = dissat_prob.and_then(|x| Some(OrdF64(x)));
+    let ord_dissat_prob = dissat_prob.map(OrdF64);
     if let Some(ret) = policy_cache.get(&(policy.clone(), ord_sat_prob, ord_dissat_prob)) {
         return Ok(ret.clone());
     }
@@ -799,77 +821,66 @@ where
     }
     macro_rules! compile_binary {
         ($l:expr, $r:expr, $w: expr, $f: expr) => {
-            compile_binary(
-                policy_cache,
-                policy,
-                &mut ret,
-                $l,
-                $r,
-                $w,
-                sat_prob,
-                dissat_prob,
-                $f,
-            )?
+            compile_binary(policy_cache, policy, &mut ret, $l, $r, $w, sat_prob, dissat_prob, $f)?
         };
     }
     macro_rules! compile_tern {
         ($a:expr, $b:expr, $c: expr, $w: expr) => {
-            compile_tern(
-                policy_cache,
-                policy,
-                &mut ret,
-                $a,
-                $b,
-                $c,
-                $w,
-                sat_prob,
-                dissat_prob,
-            )?
+            compile_tern(policy_cache, policy, &mut ret, $a, $b, $c, $w, sat_prob, dissat_prob)?
         };
     }
 
     match *policy {
         Concrete::Inscribe(ref inscription, ref sub) => {
-            let subcomp = best_compilations(policy_cache, &sub, sat_prob, dissat_prob)?;
-            for (_, child) in subcomp {
+            for (_, child) in best_compilations(policy_cache, sub, sat_prob, dissat_prob)? {
                 let ast =
                     Terminal::InscribePre(Arc::new(vec![inscription.as_ref().clone()]), child.ms);
-                // The envelope adds no witness cost. Preserve the compiled
-                // child's costs: recursive recomputation loses the branch
-                // probabilities used to compile its internal disjunctions.
-                insert_wrap!(AstElemExt {
-                    ms: Arc::new(
-                        Miniscript::from_ast(ast)
-                            .expect("validated inscription preserves the compiled child's type")
-                    ),
-                    comp_ext_data: child.comp_ext_data,
-                });
+                if let Ok(ms) = Miniscript::from_ast(ast) {
+                    insert_wrap!(AstElemExt {
+                        ms: Arc::new(ms),
+                        comp_ext_data: child.comp_ext_data
+                    });
+                }
             }
         }
         Concrete::Unsatisfiable => {
-            insert_wrap!(AstElemExt::terminal(Terminal::False));
+            insert_wrap!(AstElemExt::terminal(Miniscript::FALSE));
         }
         Concrete::Trivial => {
-            insert_wrap!(AstElemExt::terminal(Terminal::True));
+            insert_wrap!(AstElemExt::terminal(Miniscript::TRUE));
         }
         Concrete::Key(ref pk) => {
-            insert_wrap!(AstElemExt::terminal(Terminal::PkH(
-                pk.to_pubkeyhash().clone()
-            )));
-            insert_wrap!(AstElemExt::terminal(Terminal::PkK(pk.clone())));
+            insert_wrap!(AstElemExt::terminal(Miniscript::pk_h(pk.clone())));
+            insert_wrap!(AstElemExt::terminal(Miniscript::pk_k(pk.clone())));
         }
-        Concrete::After(n) => insert_wrap!(AstElemExt::terminal(Terminal::After(n))),
-        Concrete::Older(n) => insert_wrap!(AstElemExt::terminal(Terminal::Older(n))),
-        Concrete::Sha256(hash) => insert_wrap!(AstElemExt::terminal(Terminal::Sha256(hash))),
-        Concrete::Hash256(hash) => insert_wrap!(AstElemExt::terminal(Terminal::Hash256(hash))),
-        Concrete::Ripemd160(hash) => insert_wrap!(AstElemExt::terminal(Terminal::Ripemd160(hash))),
-        Concrete::Hash160(hash) => insert_wrap!(AstElemExt::terminal(Terminal::Hash160(hash))),
+        Concrete::TxTemplate(h) => insert_wrap!(AstElemExt::terminal(
+            Miniscript::from_ast(Terminal::TxTemplate(h)).expect("valid CTV type")
+        )),
+        Concrete::After(n) => insert_wrap!(AstElemExt::terminal(Miniscript::after(n))),
+        Concrete::Older(n) => insert_wrap!(AstElemExt::terminal(Miniscript::older(n))),
+        Concrete::Sha256(ref hash) => {
+            insert_wrap!(AstElemExt::terminal(Miniscript::sha256(hash.clone())))
+        }
+        // Satisfaction-cost + script-cost
+        Concrete::Hash256(ref hash) => {
+            insert_wrap!(AstElemExt::terminal(Miniscript::hash256(hash.clone())))
+        }
+        Concrete::Ripemd160(ref hash) => {
+            insert_wrap!(AstElemExt::terminal(Miniscript::ripemd160(hash.clone())))
+        }
+        Concrete::Hash160(ref hash) => {
+            insert_wrap!(AstElemExt::terminal(Miniscript::hash160(hash.clone())))
+        }
         Concrete::And(ref subs) => {
             assert_eq!(subs.len(), 2, "and takes 2 args");
-            let mut left = best_compilations(policy_cache, &subs[0], sat_prob, dissat_prob)?;
-            let mut right = best_compilations(policy_cache, &subs[1], sat_prob, dissat_prob)?;
-            let mut q_zero_right = best_compilations(policy_cache, &subs[1], sat_prob, None)?;
-            let mut q_zero_left = best_compilations(policy_cache, &subs[0], sat_prob, None)?;
+            let mut left =
+                best_compilations(policy_cache, subs[0].as_ref(), sat_prob, dissat_prob)?;
+            let mut right =
+                best_compilations(policy_cache, subs[1].as_ref(), sat_prob, dissat_prob)?;
+            let mut q_zero_right =
+                best_compilations(policy_cache, subs[1].as_ref(), sat_prob, None)?;
+            let mut q_zero_left =
+                best_compilations(policy_cache, subs[0].as_ref(), sat_prob, None)?;
 
             compile_binary!(&mut left, &mut right, [1.0, 1.0], Terminal::AndB);
             compile_binary!(&mut right, &mut left, [1.0, 1.0], Terminal::AndB);
@@ -877,12 +888,8 @@ where
             compile_binary!(&mut right, &mut left, [1.0, 1.0], Terminal::AndV);
             let mut zero_comp = BTreeMap::new();
             zero_comp.insert(
-                CompilationKey::from_type(
-                    Type::from_false(),
-                    ExtData::from_false().has_free_verify,
-                    dissat_prob,
-                ),
-                AstElemExt::terminal(Terminal::False),
+                CompilationKey::from_type(Type::FALSE, ExtData::FALSE.has_free_verify, dissat_prob),
+                AstElemExt::terminal(Miniscript::FALSE),
             );
             compile_tern!(&mut left, &mut q_zero_right, &mut zero_comp, [1.0, 0.0]);
             compile_tern!(&mut right, &mut q_zero_left, &mut zero_comp, [1.0, 0.0]);
@@ -893,74 +900,94 @@ where
             let rw = subs[1].0 as f64 / total;
 
             //and-or
-            if let (&Concrete::And(ref x), _) = (&subs[0].1, &subs[1].1) {
+            if let (Concrete::And(x), _) = (subs[0].1.as_ref(), subs[1].1.as_ref()) {
                 let mut a1 = best_compilations(
                     policy_cache,
-                    &x[0],
+                    x[0].as_ref(),
                     lw * sat_prob,
                     Some(dissat_prob.unwrap_or(0 as f64) + rw * sat_prob),
                 )?;
-                let mut a2 = best_compilations(policy_cache, &x[0], lw * sat_prob, None)?;
+                let mut a2 = best_compilations(policy_cache, x[0].as_ref(), lw * sat_prob, None)?;
 
                 let mut b1 = best_compilations(
                     policy_cache,
-                    &x[1],
+                    x[1].as_ref(),
                     lw * sat_prob,
                     Some(dissat_prob.unwrap_or(0 as f64) + rw * sat_prob),
                 )?;
-                let mut b2 = best_compilations(policy_cache, &x[1], lw * sat_prob, None)?;
+                let mut b2 = best_compilations(policy_cache, x[1].as_ref(), lw * sat_prob, None)?;
 
-                let mut c =
-                    best_compilations(policy_cache, &subs[1].1, rw * sat_prob, dissat_prob)?;
+                let mut c = best_compilations(
+                    policy_cache,
+                    subs[1].1.as_ref(),
+                    rw * sat_prob,
+                    dissat_prob,
+                )?;
 
                 compile_tern!(&mut a1, &mut b2, &mut c, [lw, rw]);
                 compile_tern!(&mut b1, &mut a2, &mut c, [lw, rw]);
             };
-            if let (_, &Concrete::And(ref x)) = (&subs[0].1, &subs[1].1) {
+            if let (_, Concrete::And(x)) = (&subs[0].1.as_ref(), subs[1].1.as_ref()) {
                 let mut a1 = best_compilations(
                     policy_cache,
-                    &x[0],
+                    x[0].as_ref(),
                     rw * sat_prob,
                     Some(dissat_prob.unwrap_or(0 as f64) + lw * sat_prob),
                 )?;
-                let mut a2 = best_compilations(policy_cache, &x[0], rw * sat_prob, None)?;
+                let mut a2 = best_compilations(policy_cache, x[0].as_ref(), rw * sat_prob, None)?;
 
                 let mut b1 = best_compilations(
                     policy_cache,
-                    &x[1],
+                    x[1].as_ref(),
                     rw * sat_prob,
                     Some(dissat_prob.unwrap_or(0 as f64) + lw * sat_prob),
                 )?;
-                let mut b2 = best_compilations(policy_cache, &x[1], rw * sat_prob, None)?;
+                let mut b2 = best_compilations(policy_cache, x[1].as_ref(), rw * sat_prob, None)?;
 
-                let mut c =
-                    best_compilations(policy_cache, &subs[0].1, lw * sat_prob, dissat_prob)?;
+                let mut c = best_compilations(
+                    policy_cache,
+                    subs[0].1.as_ref(),
+                    lw * sat_prob,
+                    dissat_prob,
+                )?;
 
                 compile_tern!(&mut a1, &mut b2, &mut c, [rw, lw]);
                 compile_tern!(&mut b1, &mut a2, &mut c, [rw, lw]);
             };
 
             let dissat_probs = |w: f64| -> Vec<Option<f64>> {
-                let mut dissat_set = Vec::new();
-                dissat_set.push(Some(dissat_prob.unwrap_or(0 as f64) + w * sat_prob));
-                dissat_set.push(Some(w * sat_prob));
-                dissat_set.push(dissat_prob);
-                dissat_set.push(None);
-                dissat_set
+                vec![
+                    Some(dissat_prob.unwrap_or(0 as f64) + w * sat_prob),
+                    Some(w * sat_prob),
+                    dissat_prob,
+                    None,
+                ]
             };
 
             let mut l_comp = vec![];
             let mut r_comp = vec![];
 
             for dissat_prob in dissat_probs(rw).iter() {
-                let l = best_compilations(policy_cache, &subs[0].1, lw * sat_prob, *dissat_prob)?;
+                let l = best_compilations(
+                    policy_cache,
+                    subs[0].1.as_ref(),
+                    lw * sat_prob,
+                    *dissat_prob,
+                )?;
                 l_comp.push(l);
             }
 
             for dissat_prob in dissat_probs(lw).iter() {
-                let r = best_compilations(policy_cache, &subs[1].1, rw * sat_prob, *dissat_prob)?;
+                let r = best_compilations(
+                    policy_cache,
+                    subs[1].1.as_ref(),
+                    rw * sat_prob,
+                    *dissat_prob,
+                )?;
                 r_comp.push(r);
             }
+
+            // or(sha256, pk)
             compile_binary!(&mut l_comp[0], &mut r_comp[0], [lw, rw], Terminal::OrB);
             compile_binary!(&mut r_comp[0], &mut l_comp[0], [rw, lw], Terminal::OrB);
 
@@ -976,23 +1003,23 @@ where
             compile_binary!(&mut l_comp[3], &mut r_comp[2], [lw, rw], Terminal::OrI);
             compile_binary!(&mut r_comp[3], &mut l_comp[2], [rw, lw], Terminal::OrI);
         }
-        Concrete::Threshold(k, ref subs) => {
-            let n = subs.len();
+        Concrete::Thresh(ref thresh) => {
+            let k = thresh.k();
+            let n = thresh.n();
             let k_over_n = k as f64 / n as f64;
 
-            let mut sub_ast = Vec::with_capacity(n);
             let mut sub_ext_data = Vec::with_capacity(n);
 
             let mut best_es = Vec::with_capacity(n);
             let mut best_ws = Vec::with_capacity(n);
 
-            let mut min_value = (0 as usize, f64::INFINITY as f64);
-            for (i, ast) in subs.iter().enumerate() {
+            let mut min_value = (0, f64::INFINITY);
+            for (i, ast) in thresh.iter().enumerate() {
                 let sp = sat_prob * k_over_n;
                 //Expressions must be dissatisfiable
                 let dp = Some(dissat_prob.unwrap_or(0 as f64) + (1.0 - k_over_n) * sat_prob);
-                let be = best(types::Base::B, policy_cache, ast, sp, dp)?;
-                let bw = best(types::Base::W, policy_cache, ast, sp, dp)?;
+                let be = best(types::Base::B, policy_cache, ast.as_ref(), sp, dp)?;
+                let bw = best(types::Base::W, policy_cache, ast.as_ref(), sp, dp)?;
 
                 let diff = be.cost_1d(sp, dp) - bw.cost_1d(sp, dp);
                 best_es.push((be.comp_ext_data, be));
@@ -1003,59 +1030,77 @@ where
                     min_value.1 = diff;
                 }
             }
-            sub_ext_data.push(best_es[min_value.0].0);
-            sub_ast.push(Arc::clone(&best_es[min_value.0].1.ms));
-            for (i, _ast) in subs.iter().enumerate() {
-                if i != min_value.0 {
-                    sub_ext_data.push(best_ws[i].0);
-                    sub_ast.push(Arc::clone(&best_ws[i].1.ms));
-                }
+
+            // Construct the threshold, swapping the index of the best (i.e. most
+            // advantageous to be a E vs a W) entry into the first slot so that
+            // it can be an E.
+            let mut idx = 0;
+            let ast = Terminal::Thresh(thresh.map_ref(|_| {
+                let ret = if idx == 0 {
+                    // swap 0 with min_value...
+                    sub_ext_data.push(best_es[min_value.0].0);
+                    Arc::clone(&best_es[min_value.0].1.ms)
+                } else if idx == min_value.0 {
+                    // swap min_value with 0...
+                    sub_ext_data.push(best_ws[0].0);
+                    Arc::clone(&best_ws[0].1.ms)
+                } else {
+                    // ...and leave everything else unchanged
+                    sub_ext_data.push(best_ws[idx].0);
+                    Arc::clone(&best_ws[idx].1.ms)
+                };
+                idx += 1;
+                ret
+            }));
+
+            if let Ok(ms) = Miniscript::from_ast(ast) {
+                let ast_ext = AstElemExt {
+                    ms: Arc::new(ms),
+                    comp_ext_data: CompilerExtData::threshold(k, n, |i| sub_ext_data[i]),
+                };
+                insert_wrap!(ast_ext);
             }
 
-            let ast = Terminal::Thresh(k, sub_ast);
-            let ast_ext = AstElemExt {
-                ms: Arc::new(
-                    Miniscript::from_ast(ast)
-                        .expect("threshold subs, which we just compiled, typeck"),
-                ),
-                comp_ext_data: CompilerExtData::threshold(k, n, |i| Ok(sub_ext_data[i]))
-                    .expect("threshold subs, which we just compiled, typeck"),
-            };
-            insert_wrap!(ast_ext);
-
-            let key_vec: Vec<Pk> = subs
+            let key_count = thresh
                 .iter()
-                .filter_map(|s| {
-                    if let Concrete::Key(ref pk) = *s {
-                        Some(pk.clone())
+                .filter(|s| matches!(***s, Concrete::Key(_)))
+                .count();
+            if key_count == thresh.n() {
+                let pk_thresh = thresh.map_ref(|s| {
+                    if let Concrete::Key(ref pk) = **s {
+                        Pk::clone(pk)
                     } else {
-                        None
+                        unreachable!()
                     }
-                })
-                .collect();
-
-            if key_vec.len() == subs.len() && subs.len() <= MAX_PUBKEYS_PER_MULTISIG {
-                insert_wrap!(AstElemExt::terminal(Terminal::Multi(k, key_vec)));
-            }
-            // Not a threshold, it's always more optimal to translate it to and()s as we save the
-            // resulting threshold check (N EQUAL) in any case.
-            else if k == subs.len() {
-                let mut policy = subs.first().expect("No sub policy in thresh() ?").clone();
-                for sub in &subs[1..] {
-                    policy = Concrete::And(vec![sub.clone(), policy]);
+                });
+                match Ctx::sig_type() {
+                    SigType::Schnorr => {
+                        if let Ok(pk_thresh) = pk_thresh.set_maximum() {
+                            insert_wrap!(AstElemExt::terminal(Miniscript::multi_a(pk_thresh)))
+                        }
+                    }
+                    SigType::Ecdsa => {
+                        if let Ok(pk_thresh) = pk_thresh.set_maximum() {
+                            insert_wrap!(AstElemExt::terminal(Miniscript::multi(pk_thresh)))
+                        }
+                    }
                 }
+            }
+            if thresh.is_and() {
+                let mut it = thresh.iter();
+                let mut policy = it.next().expect("No sub policy in thresh() ?").clone();
+                policy = it.fold(policy, |acc, pol| Concrete::And(vec![acc, pol.clone()]).into());
 
-                ret = best_compilations(policy_cache, &policy, sat_prob, dissat_prob)?;
+                ret = best_compilations(policy_cache, policy.as_ref(), sat_prob, dissat_prob)?;
             }
 
-            // FIXME: Should we also optimize thresh(1, subs) ?
+            // FIXME: Should we also special-case thresh.is_or() ?
         }
-        Concrete::TxTemplate(h) => insert_wrap!(AstElemExt::terminal(Terminal::TxTemplate(h))),
     }
     for k in ret.keys() {
         debug_assert_eq!(k.dissat_prob, ord_dissat_prob);
     }
-    if ret.len() == 0 {
+    if ret.is_empty() {
         // The only reason we are discarding elements out of compiler is because
         // compilations exceeded consensus and standardness limits or are non-malleable.
         // If there no possible compilations for any policies regardless of dissat
@@ -1072,6 +1117,7 @@ where
 /// Helper function to compile different types of binary fragments.
 /// `sat_prob` and `dissat_prob` represent the sat and dissat probabilities of
 /// root or. `weights` represent the odds for taking each sub branch
+#[allow(clippy::too_many_arguments)]
 fn compile_binary<Pk, Ctx, F>(
     policy_cache: &mut PolicyCache<Pk, Ctx>,
     policy: &Concrete<Pk>,
@@ -1106,6 +1152,7 @@ where
 /// Helper function to compile different order of and_or fragments.
 /// `sat_prob` and `dissat_prob` represent the sat and dissat probabilities of
 /// root and_or node. `weights` represent the odds for taking each sub branch
+#[allow(clippy::too_many_arguments)]
 fn compile_tern<Pk: MiniscriptKey, Ctx: ScriptContext>(
     policy_cache: &mut PolicyCache<Pk, Ctx>,
     policy: &Concrete<Pk>,
@@ -1165,8 +1212,7 @@ where
     best_compilations(policy_cache, policy, sat_prob, dissat_prob)?
         .into_iter()
         .filter(|&(key, _)| {
-            key.ty.corr.base == types::Base::B
-                && key.dissat_prob == dissat_prob.and_then(|x| Some(OrdF64(x)))
+            key.ty.corr.base == types::Base::B && key.dissat_prob == dissat_prob.map(OrdF64)
         })
         .map(|(_, val)| val)
         .min_by_key(|ext| OrdF64(ext.cost_1d(sat_prob, dissat_prob)))
@@ -1187,11 +1233,11 @@ where
 {
     best_compilations(policy_cache, policy, sat_prob, dissat_prob)?
         .into_iter()
-        .filter(|&(ref key, ref val)| {
+        .filter(|(key, val)| {
             key.ty.corr.base == basic_type
                 && key.ty.corr.unit
                 && val.ms.ty.mall.dissat == types::Dissat::Unique
-                && key.dissat_prob == dissat_prob.and_then(|x| Some(OrdF64(x)))
+                && key.dissat_prob == dissat_prob.map(OrdF64)
         })
         .map(|(_, val)| val)
         .min_by_key(|ext| OrdF64(ext.cost_1d(sat_prob, dissat_prob)))
@@ -1200,37 +1246,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bitcoin::blockdata::{opcodes, script};
-    use bitcoin::{self, hashes, secp256k1};
-    use std::collections::HashMap;
-    use std::str::FromStr;
-    use std::string::String;
+    use core::str::FromStr;
 
-    use miniscript::{satisfy, Legacy, Segwitv0, Tap};
-    use policy::Liftable;
-    use script_num_size;
+    use bitcoin::blockdata::{opcodes, script};
+    use bitcoin::hashes;
+
+    use super::*;
+    use crate::miniscript::{Legacy, Segwitv0, Tap};
+    use crate::policy::Liftable;
+    use crate::{script_num_size, AbsLockTime, RelLockTime, Threshold, ToPublicKey};
 
     type SPolicy = Concrete<String>;
     type BPolicy = Concrete<bitcoin::PublicKey>;
-    type DummyTapAstElemExt = policy::compiler::AstElemExt<String, Tap>;
+    type TapAstElemExt = policy::compiler::AstElemExt<String, Tap>;
     type SegwitMiniScript = Miniscript<bitcoin::PublicKey, Segwitv0>;
-
-    #[test]
-    fn ordered_float_signed_zeros_hash_equally() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let positive_zero = OrdF64(0.0);
-        let negative_zero = OrdF64(-0.0);
-        assert_eq!(positive_zero, negative_zero);
-
-        let mut positive_hash = DefaultHasher::new();
-        let mut negative_hash = DefaultHasher::new();
-        positive_zero.hash(&mut positive_hash);
-        negative_zero.hash(&mut negative_hash);
-        assert_eq!(positive_hash.finish(), negative_hash.finish());
-    }
 
     fn pubkeys_and_a_sig(n: usize) -> (Vec<bitcoin::PublicKey>, secp256k1::ecdsa::Signature) {
         let mut ret = Vec::with_capacity(n);
@@ -1251,7 +1280,7 @@ mod tests {
             ret.push(pk);
         }
         let sig = secp.sign_ecdsa(
-            &secp256k1::Message::from_slice(&sk[..]).expect("secret key"),
+            &secp256k1::Message::from_digest(sk), // Not a digest but 32 bytes nonetheless.
             &secp256k1::SecretKey::from_slice(&sk[..]).expect("secret key"),
         );
         (ret, sig)
@@ -1261,10 +1290,7 @@ mod tests {
         let policy = SPolicy::from_str(s).expect("parse");
         let miniscript: Miniscript<String, Segwitv0> = policy.compile()?;
 
-        assert_eq!(
-            policy.lift().unwrap().sorted(),
-            miniscript.lift().unwrap().sorted()
-        );
+        assert_eq!(policy.lift().unwrap().sorted(), miniscript.lift().unwrap().sorted());
         Ok(())
     }
 
@@ -1272,8 +1298,11 @@ mod tests {
     fn compile_timelocks() {
         // artificially create a policy that is problematic and try to compile
         let pol: SPolicy = Concrete::And(vec![
-            Concrete::Key("A".to_string()),
-            Concrete::And(vec![Concrete::After(9), Concrete::After(1000_000_000)]),
+            Arc::new(Concrete::Key("A".to_string())),
+            Arc::new(Concrete::And(vec![
+                Arc::new(Concrete::After(AbsLockTime::from_consensus(9).unwrap())),
+                Arc::new(Concrete::After(AbsLockTime::from_consensus(1_000_000_000).unwrap())),
+            ])),
         ]);
         assert!(pol.compile::<Segwitv0>().is_err());
 
@@ -1286,14 +1315,8 @@ mod tests {
     #[test]
     fn compile_basic() {
         assert!(policy_compile_lift_check("pk(A)").is_ok());
-        assert_eq!(
-            policy_compile_lift_check("after(9)"),
-            Err(CompilerError::TopLevelNonSafe)
-        );
-        assert_eq!(
-            policy_compile_lift_check("older(1)"),
-            Err(CompilerError::TopLevelNonSafe)
-        );
+        assert_eq!(policy_compile_lift_check("after(9)"), Err(CompilerError::TopLevelNonSafe));
+        assert_eq!(policy_compile_lift_check("older(1)"), Err(CompilerError::TopLevelNonSafe));
         assert_eq!(
             policy_compile_lift_check(
                 "sha256(1111111111111111111111111111111111111111111111111111111111111111)"
@@ -1319,35 +1342,28 @@ mod tests {
     #[test]
     fn compile_q() {
         let policy = SPolicy::from_str("or(1@and(pk(A),pk(B)),127@pk(C))").expect("parsing");
-        let compilation: DummyTapAstElemExt =
-            best_t(&mut BTreeMap::new(), &policy, 1.0, None).unwrap();
+        let compilation: TapAstElemExt = best_t(&mut BTreeMap::new(), &policy, 1.0, None).unwrap();
 
-        assert_eq!(compilation.cost_1d(1.0, None), 88.0 + 74.109375);
-        assert_eq!(
-            policy.lift().unwrap().sorted(),
-            compilation.ms.lift().unwrap().sorted()
-        );
+        assert_eq!(compilation.cost_1d(1.0, None), 87.0 + 67.0390625);
+        assert_eq!(policy.lift().unwrap().sorted(), compilation.ms.lift().unwrap().sorted());
 
         // compile into taproot context to avoid limit errors
         let policy = SPolicy::from_str(
                 "and(and(and(or(127@thresh(2,pk(A),pk(B),thresh(2,or(127@pk(A),1@pk(B)),after(100),or(and(pk(C),after(200)),and(pk(D),sha256(66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925))),pk(E))),1@pk(F)),sha256(66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925)),or(127@pk(G),1@after(300))),or(127@after(400),pk(H)))"
             ).expect("parsing");
-        let compilation: DummyTapAstElemExt =
-            best_t(&mut BTreeMap::new(), &policy, 1.0, None).unwrap();
+        let compilation: TapAstElemExt = best_t(&mut BTreeMap::new(), &policy, 1.0, None).unwrap();
 
-        assert_eq!(compilation.cost_1d(1.0, None), 438.0 + 299.4003295898438);
-        assert_eq!(
-            policy.lift().unwrap().sorted(),
-            compilation.ms.lift().unwrap().sorted()
-        );
+        assert_eq!(compilation.cost_1d(1.0, None), 433.0 + 275.7909749348958);
+        assert_eq!(policy.lift().unwrap().sorted(), compilation.ms.lift().unwrap().sorted());
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn compile_misc() {
-        let (keys, sig) = pubkeys_and_a_sig(10);
+        let (keys, signature) = pubkeys_and_a_sig(10);
         let key_pol: Vec<BPolicy> = keys.iter().map(|k| Concrete::Key(*k)).collect();
 
-        let policy: BPolicy = Concrete::Key(keys[0].clone());
+        let policy: BPolicy = Concrete::Key(keys[0]);
         let ms: SegwitMiniScript = policy.compile().unwrap();
         assert_eq!(
             ms.encode(),
@@ -1381,13 +1397,22 @@ mod tests {
 
         // Liquid policy
         let policy: BPolicy = Concrete::Or(vec![
-            (127, Concrete::Threshold(3, key_pol[0..5].to_owned())),
+            (
+                127,
+                Arc::new(Concrete::Thresh(
+                    Threshold::from_iter(3, key_pol[0..5].iter().map(|p| (p.clone()).into()))
+                        .unwrap(),
+                )),
+            ),
             (
                 1,
-                Concrete::And(vec![
-                    Concrete::Older(10000),
-                    Concrete::Threshold(2, key_pol[5..8].to_owned()),
-                ]),
+                Arc::new(Concrete::And(vec![
+                    Arc::new(Concrete::Older(RelLockTime::from_height(10000))),
+                    Arc::new(Concrete::Thresh(
+                        Threshold::from_iter(2, key_pol[5..8].iter().map(|p| (p.clone()).into()))
+                            .unwrap(),
+                    )),
+                ])),
             ),
         ]);
 
@@ -1402,9 +1427,9 @@ mod tests {
             keys[2],
             keys[3],
             keys[4],
-            keys[5].to_pubkeyhash(),
-            keys[6].to_pubkeyhash(),
-            keys[7].to_pubkeyhash()
+            keys[5],
+            keys[6],
+            keys[7]
         );
 
         assert_eq!(ms, ms_comp_res);
@@ -1412,42 +1437,49 @@ mod tests {
         let mut abs = policy.lift().unwrap();
         assert_eq!(abs.n_keys(), 8);
         assert_eq!(abs.minimum_n_keys(), Some(2));
-        abs = abs.at_age(10000);
+        abs = abs.at_age(RelLockTime::from_height(10000).into());
         assert_eq!(abs.n_keys(), 8);
         assert_eq!(abs.minimum_n_keys(), Some(2));
-        abs = abs.at_age(9999);
+        abs = abs.at_age(RelLockTime::from_height(9999).into());
         assert_eq!(abs.n_keys(), 5);
         assert_eq!(abs.minimum_n_keys(), Some(3));
-        abs = abs.at_age(0);
+        abs = abs.at_age(RelLockTime::ZERO.into());
         assert_eq!(abs.n_keys(), 5);
         assert_eq!(abs.minimum_n_keys(), Some(3));
 
-        let bitcoinsig = bitcoin::EcdsaSig {
-            sig,
-            hash_ty: bitcoin::EcdsaSighashType::All,
+        let bitcoinsig = bitcoin::ecdsa::Signature {
+            signature,
+            sighash_type: bitcoin::sighash::EcdsaSighashType::All,
         };
         let sigvec = bitcoinsig.to_vec();
 
-        let no_sat = HashMap::<bitcoin::PublicKey, bitcoin::EcdsaSig>::new();
-        let mut left_sat = HashMap::<bitcoin::PublicKey, bitcoin::EcdsaSig>::new();
-        let mut right_sat =
-            HashMap::<hashes::hash160::Hash, (bitcoin::PublicKey, bitcoin::EcdsaSig)>::new();
+        let no_sat = BTreeMap::<bitcoin::PublicKey, bitcoin::ecdsa::Signature>::new();
+        let mut left_sat = BTreeMap::<bitcoin::PublicKey, bitcoin::ecdsa::Signature>::new();
+        let mut right_sat = BTreeMap::<
+            hashes::hash160::Hash,
+            (bitcoin::PublicKey, bitcoin::ecdsa::Signature),
+        >::new();
 
         for i in 0..5 {
             left_sat.insert(keys[i], bitcoinsig);
         }
         for i in 5..8 {
-            right_sat.insert(keys[i].to_pubkeyhash(), (keys[i], bitcoinsig));
+            right_sat.insert(keys[i].to_pubkeyhash(SigType::Ecdsa), (keys[i], bitcoinsig));
         }
 
         assert!(ms.satisfy(no_sat).is_err());
         assert!(ms.satisfy(&left_sat).is_ok());
-        assert!(ms.satisfy((&right_sat, satisfy::Older(10001))).is_ok());
+        assert!(ms
+            .satisfy((&right_sat, RelLockTime::from_height(10001)))
+            .is_ok());
         //timelock not met
-        assert!(ms.satisfy((&right_sat, satisfy::Older(9999))).is_err());
+        assert!(ms
+            .satisfy((&right_sat, RelLockTime::from_height(9999)))
+            .is_err());
 
         assert_eq!(
-            ms.satisfy((left_sat, satisfy::Older(9999))).unwrap(),
+            ms.satisfy((left_sat, RelLockTime::from_height(9999)))
+                .unwrap(),
             vec![
                 // sat for left branch
                 vec![],
@@ -1458,7 +1490,8 @@ mod tests {
         );
 
         assert_eq!(
-            ms.satisfy((right_sat, satisfy::Older(10000))).unwrap(),
+            ms.satisfy((right_sat, RelLockTime::from_height(10000)))
+                .unwrap(),
             vec![
                 // sat for right branch
                 vec![],
@@ -1480,18 +1513,19 @@ mod tests {
     fn compile_thresh() {
         let (keys, _) = pubkeys_and_a_sig(21);
 
-        // Up until 20 keys, thresh should be compiled to a multi no matter the value of k
+        // For 3 < n <= 20, thresh should be compiled to a multi no matter the value of k
         for k in 1..4 {
             let small_thresh: BPolicy = policy_str!(
-                "thresh({},pk({}),pk({}),pk({}))",
+                "thresh({},pk({}),pk({}),pk({}),pk({}))",
                 k,
                 keys[0],
                 keys[1],
-                keys[2]
+                keys[2],
+                keys[3]
             );
             let small_thresh_ms: SegwitMiniScript = small_thresh.compile().unwrap();
             let small_thresh_ms_expected: SegwitMiniScript =
-                ms_str!("multi({},{},{},{})", k, keys[0], keys[1], keys[2]);
+                ms_str!("multi({},{},{},{},{})", k, keys[0], keys[1], keys[2], keys[3]);
             assert_eq!(small_thresh_ms, small_thresh_ms_expected);
         }
 
@@ -1499,9 +1533,12 @@ mod tests {
         // and to a ms thresh otherwise.
         // k = 1 (or 2) does not compile, see https://github.com/rust-bitcoin/rust-miniscript/issues/114
         for k in &[10, 15, 21] {
-            let pubkeys: Vec<Concrete<bitcoin::PublicKey>> =
-                keys.iter().map(|pubkey| Concrete::Key(*pubkey)).collect();
-            let big_thresh = Concrete::Threshold(*k, pubkeys);
+            let thresh: Threshold<Arc<Concrete<bitcoin::PublicKey>>, 0> = Threshold::from_iter(
+                *k,
+                keys.iter().map(|pubkey| Arc::new(Concrete::Key(*pubkey))),
+            )
+            .unwrap();
+            let big_thresh = Concrete::Thresh(thresh);
             let big_thresh_ms: SegwitMiniScript = big_thresh.compile().unwrap();
             if *k == 21 {
                 // N * (PUSH + pubkey + CHECKSIGVERIFY)
@@ -1522,42 +1559,47 @@ mod tests {
     }
 
     #[test]
-    fn segwit_limits() {
+    fn segwit_limits_1() {
         // Hit the maximum witness script size limit.
         // or(thresh(52, [pubkey; 52]), thresh(52, [pubkey; 52])) results in a 3642-bytes long
         // witness script with only 54 stack elements
         let (keys, _) = pubkeys_and_a_sig(104);
-        let keys_a: Vec<Concrete<bitcoin::PublicKey>> = keys[..keys.len() / 2]
+        let keys_a: Vec<Arc<Concrete<bitcoin::PublicKey>>> = keys[..keys.len() / 2]
             .iter()
-            .map(|pubkey| Concrete::Key(*pubkey))
+            .map(|pubkey| Arc::new(Concrete::Key(*pubkey)))
             .collect();
-        let keys_b: Vec<Concrete<bitcoin::PublicKey>> = keys[keys.len() / 2..]
+        let keys_b: Vec<Arc<Concrete<bitcoin::PublicKey>>> = keys[keys.len() / 2..]
             .iter()
-            .map(|pubkey| Concrete::Key(*pubkey))
+            .map(|pubkey| Arc::new(Concrete::Key(*pubkey)))
             .collect();
 
         let thresh_res: Result<SegwitMiniScript, _> = Concrete::Or(vec![
-            (1, Concrete::Threshold(keys_a.len(), keys_a)),
-            (1, Concrete::Threshold(keys_b.len(), keys_b)),
+            (1, Arc::new(Concrete::Thresh(Threshold::and_n(keys_a)))),
+            (1, Arc::new(Concrete::Thresh(Threshold::and_n(keys_b)))),
         ])
         .compile();
-        let script_size = thresh_res.clone().and_then(|m| Ok(m.script_size()));
+        let script_size = thresh_res.clone().map(|m| m.script_size());
         assert_eq!(
             thresh_res,
             Err(CompilerError::LimitsExceeded),
             "Compilation succeeded with a witscript size of '{:?}'",
             script_size,
         );
+    }
 
+    #[test]
+    fn segwit_limits_2() {
         // Hit the maximum witness stack elements limit
         let (keys, _) = pubkeys_and_a_sig(100);
-        let keys: Vec<Concrete<bitcoin::PublicKey>> =
-            keys.iter().map(|pubkey| Concrete::Key(*pubkey)).collect();
+        let keys: Vec<Arc<Concrete<bitcoin::PublicKey>>> = keys
+            .iter()
+            .map(|pubkey| Arc::new(Concrete::Key(*pubkey)))
+            .collect();
         let thresh_res: Result<SegwitMiniScript, _> =
-            Concrete::Threshold(keys.len(), keys).compile();
+            Concrete::Thresh(Threshold::and_n(keys)).compile();
         let n_elements = thresh_res
             .clone()
-            .and_then(|m| Ok(m.max_satisfaction_witness_elements()));
+            .map(|m| m.max_satisfaction_witness_elements());
         assert_eq!(
             thresh_res,
             Err(CompilerError::LimitsExceeded),
@@ -1570,11 +1612,13 @@ mod tests {
     fn shared_limits() {
         // Test the maximum number of OPs with a 67-of-68 multisig
         let (keys, _) = pubkeys_and_a_sig(68);
-        let keys: Vec<Concrete<bitcoin::PublicKey>> =
-            keys.iter().map(|pubkey| Concrete::Key(*pubkey)).collect();
-        let thresh_res: Result<SegwitMiniScript, _> =
-            Concrete::Threshold(keys.len() - 1, keys).compile();
-        let ops_count = thresh_res.clone().and_then(|m| Ok(m.ext.ops_count_sat));
+        let thresh = Threshold::from_iter(
+            keys.len() - 1,
+            keys.iter().map(|pubkey| Arc::new(Concrete::Key(*pubkey))),
+        )
+        .unwrap();
+        let thresh_res: Result<SegwitMiniScript, _> = Concrete::Thresh(thresh).compile();
+        let ops_count = thresh_res.clone().map(|m| m.ext.sat_op_count());
         assert_eq!(
             thresh_res,
             Err(CompilerError::LimitsExceeded),
@@ -1583,10 +1627,14 @@ mod tests {
         );
         // For legacy too..
         let (keys, _) = pubkeys_and_a_sig(68);
-        let keys: Vec<Concrete<bitcoin::PublicKey>> =
-            keys.iter().map(|pubkey| Concrete::Key(*pubkey)).collect();
-        let thresh_res = Concrete::Threshold(keys.len() - 1, keys).compile::<Legacy>();
-        let ops_count = thresh_res.clone().and_then(|m| Ok(m.ext.ops_count_sat));
+        let thresh = Threshold::from_iter(
+            keys.len() - 1,
+            keys.iter().map(|pubkey| Arc::new(Concrete::Key(*pubkey))),
+        )
+        .unwrap();
+
+        let thresh_res = Concrete::Thresh(thresh).compile::<Legacy>();
+        let ops_count = thresh_res.clone().map(|m| m.ext.sat_op_count());
         assert_eq!(
             thresh_res,
             Err(CompilerError::LimitsExceeded),
@@ -1596,68 +1644,36 @@ mod tests {
 
         // Test that we refuse to compile policies with duplicated keys
         let (keys, _) = pubkeys_and_a_sig(1);
-        let key = Concrete::Key(keys[0]);
-        let res = Concrete::Or(vec![(1, key.clone()), (1, key.clone())]).compile::<Segwitv0>();
+        let key = Arc::new(Concrete::Key(keys[0]));
+        let res =
+            Concrete::Or(vec![(1, Arc::clone(&key)), (1, Arc::clone(&key))]).compile::<Segwitv0>();
         assert_eq!(
             res,
-            Err(CompilerError::PolicyError(
-                policy::concrete::PolicyError::DuplicatePubKeys
-            ))
+            Err(CompilerError::PolicyError(policy::concrete::PolicyError::DuplicatePubKeys))
         );
         // Same for legacy
         let res = Concrete::Or(vec![(1, key.clone()), (1, key)]).compile::<Legacy>();
         assert_eq!(
             res,
-            Err(CompilerError::PolicyError(
-                policy::concrete::PolicyError::DuplicatePubKeys
-            ))
+            Err(CompilerError::PolicyError(policy::concrete::PolicyError::DuplicatePubKeys))
         );
     }
-}
 
-#[cfg(all(test, feature = "unstable"))]
-mod benches {
-    use std::str::FromStr;
-    use test::{black_box, Bencher};
-
-    use super::{CompilerError, Concrete};
-    use miniscript::Tap;
-    use Miniscript;
-    type TapMsRes = Result<Miniscript<String, Tap>, CompilerError>;
-    #[bench]
-    pub fn compile_basic(bh: &mut Bencher) {
-        let h = (0..64).map(|_| "a").collect::<String>();
-        let pol = Concrete::<String>::from_str(&format!(
-            "and(thresh(2,and(sha256({}),or(sha256({}),pk(A))),pk(B),pk(C),pk(D),sha256({})),pk(E))",
-            h, h, h
-        ))
-        .expect("parsing");
-        bh.iter(|| {
-            let pt: TapMsRes = pol.compile();
-            black_box(pt).unwrap();
-        });
-    }
-
-    #[bench]
-    pub fn compile_large(bh: &mut Bencher) {
-        let h = (0..64).map(|_| "a").collect::<String>();
-        let pol = Concrete::<String>::from_str(
-            &format!("or(pk(L),thresh(9,sha256({}),pk(A),pk(B),and(or(pk(C),pk(D)),pk(E)),after(100),pk(F),pk(G),pk(H),pk(I),and(pk(J),pk(K))))", h)
-        ).expect("parsing");
-        bh.iter(|| {
-            let pt: TapMsRes = pol.compile();
-            black_box(pt).unwrap();
-        });
-    }
-
-    #[bench]
-    pub fn compile_xlarge(bh: &mut Bencher) {
-        let pol = Concrete::<String>::from_str(
-            "or(pk(A),thresh(4,pk(B),older(100),pk(C),and(after(100),or(pk(D),or(pk(E),and(pk(F),thresh(2,pk(G),or(pk(H),and(thresh(5,pk(I),or(pk(J),pk(K)),pk(L),pk(M),pk(N),pk(O),pk(P),pk(Q),pk(R),pk(S),pk(T)),pk(U))),pk(V),or(and(pk(W),pk(X)),pk(Y)),after(100)))))),pk(Z)))"
-        ).expect("parsing");
-        bh.iter(|| {
-            let pt: TapMsRes = pol.compile();
-            black_box(pt).unwrap();
-        });
+    #[test]
+    fn compile_tr_thresh() {
+        for k in 1..4 {
+            let small_thresh: Concrete<String> =
+                policy_str!("{}", &format!("thresh({},pk(B),pk(C),pk(D))", k));
+            let small_thresh_ms: Miniscript<String, Tap> = small_thresh.compile().unwrap();
+            // When k == 3 it is more efficient to use and_v than multi_a
+            if k == 3 {
+                assert_eq!(
+                    small_thresh_ms,
+                    ms_str!("and_v(v:and_v(vc:pk_k(B),c:pk_k(C)),c:pk_k(D))")
+                );
+            } else {
+                assert_eq!(small_thresh_ms, ms_str!("multi_a({},B,C,D)", k));
+            }
+        }
     }
 }

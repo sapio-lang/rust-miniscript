@@ -1,10 +1,12 @@
-extern crate sapio_miniscript as miniscript;
+use std::str::FromStr;
+
+use bitcoin::hex::FromHex;
 extern crate serde_json;
 
 use miniscript::bitcoin::consensus::deserialize;
-use miniscript::bitcoin::hashes::{hex::FromHex, sha256};
-use miniscript::bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use miniscript::bitcoin::{PublicKey, Script, Transaction, Witness};
+use miniscript::bitcoin::hashes::sha256;
+use miniscript::bitcoin::psbt::Psbt;
+use miniscript::bitcoin::{PublicKey, ScriptBuf as Script, Transaction, Witness};
 use miniscript::psbt::PsbtInputSatisfier;
 use miniscript::Satisfier;
 
@@ -36,7 +38,7 @@ fn matches_complete_bip119_hash_vectors() {
         assert_eq!(indices.len(), results.len());
         for (index, expected) in indices.iter().zip(results) {
             let index = index.as_u64().unwrap() as usize;
-            let expected = sha256::Hash::from_hex(expected.as_str().unwrap()).unwrap();
+            let expected = sha256::Hash::from_str(expected.as_str().unwrap()).unwrap();
             // BIP-119 also supplies indices outside the transaction's inputs:
             // the hash commits to the supplied u32 without indexing the inputs.
             let satisfier = PsbtInputSatisfier::new(&psbt, index);

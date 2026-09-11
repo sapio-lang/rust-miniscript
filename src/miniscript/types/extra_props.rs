@@ -1,21 +1,19 @@
+// SPDX-License-Identifier: CC0-1.0
+
 //! Other miscellaneous type properties which are not related to
 //! correctness or malleability.
 
-use miniscript::limits::{
-    HEIGHT_TIME_THRESHOLD, SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_TYPE_FLAG,
-};
+use core::cmp;
+use core::iter::once;
 
-use super::{Error, ErrorKind, Property, ScriptContext};
-use script_num_size;
-use std::cmp;
-use std::iter::once;
-use std::sync::Arc;
-use MiniscriptKey;
-use Terminal;
+use super::ScriptContext;
+use crate::miniscript::limits::MAX_PUBKEYS_PER_MULTISIG;
+use crate::prelude::*;
+use crate::{script_num_size, AbsLockTime, MiniscriptKey, RelLockTime, Terminal};
 
-/// Helper struct Whether any satisfaction of this fragment contains any timelocks
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct TimeLockInfo {
+/// Timelock information for satisfaction of a fragment.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, Hash)]
+pub struct TimelockInfo {
     /// csv with heights
     pub csv_with_height: bool,
     /// csv with times
@@ -28,9 +26,10 @@ pub struct TimeLockInfo {
     pub contains_combination: bool,
 }
 
-impl Default for TimeLockInfo {
-    fn default() -> Self {
-        Self {
+impl TimelockInfo {
+    /// Creates a new `TimelockInfo` with all fields set to false.
+    pub const fn new() -> Self {
+        TimelockInfo {
             csv_with_height: false,
             csv_with_time: false,
             cltv_with_height: false,
@@ -38,32 +37,25 @@ impl Default for TimeLockInfo {
             contains_combination: false,
         }
     }
-}
 
-impl TimeLockInfo {
-    /// Whether the current contains any possible unspendable
-    /// path
-    pub fn contains_unspendable_path(self) -> bool {
-        self.contains_combination
+    /// Returns true if the current `TimelockInfo` contains any possible unspendable paths.
+    pub fn contains_unspendable_path(self) -> bool { self.contains_combination }
+
+    /// Combines two `TimelockInfo` structs setting `contains_combination` if required (logical and).
+    pub(crate) fn combine_and(a: Self, b: Self) -> Self {
+        Self::combine_threshold(2, once(a).chain(once(b)))
     }
 
-    // handy function for combining `and` timelocks
-    // This can be operator overloaded in future
-    pub(crate) fn comb_and_timelocks(a: Self, b: Self) -> Self {
-        Self::combine_thresh_timelocks(2, once(a).chain(once(b)))
+    /// Combines two `TimelockInfo` structs, does not set `contains_combination` (logical or).
+    pub(crate) fn combine_or(a: Self, b: Self) -> Self {
+        Self::combine_threshold(1, once(a).chain(once(b)))
     }
 
-    // handy function for combining `or` timelocks
-    // This can be operator overloaded in future
-    pub(crate) fn comb_or_timelocks(a: Self, b: Self) -> Self {
-        Self::combine_thresh_timelocks(1, once(a).chain(once(b)))
-    }
-
-    pub(crate) fn combine_thresh_timelocks<I>(k: usize, sub_timelocks: I) -> TimeLockInfo
+    /// Combines timelocks, if threshold `k` is greater than one we check for any unspendable paths.
+    pub(crate) fn combine_threshold<I>(k: usize, timelocks: I) -> TimelockInfo
     where
-        I: IntoIterator<Item = TimeLockInfo>,
+        I: IntoIterator<Item = TimelockInfo>,
     {
-        // timelocks calculation
         // Propagate all fields of `TimelockInfo` from each of the node's children to the node
         // itself (by taking the logical-or of all of them). In case `k == 1` (this is a disjunction)
         // this is all we need to do: the node may behave like any of its children, for purposes
@@ -71,26 +63,80 @@ impl TimeLockInfo {
         //
         // If `k > 1` we have the additional consideration that if any two children have conflicting
         // timelock requirements, this represents an inaccessible spending branch.
-        sub_timelocks.into_iter().fold(
-            TimeLockInfo::default(),
-            |mut timelock_info, sub_timelock| {
+        timelocks
+            .into_iter()
+            .fold(TimelockInfo::default(), |mut acc, t| {
                 // If more than one branch may be taken, and some other branch has a requirement
-                // that conflicts with this one, set `contains_combination`
-                if k >= 2 {
-                    timelock_info.contains_combination |= (timelock_info.csv_with_height
-                        && sub_timelock.csv_with_time)
-                        || (timelock_info.csv_with_time && sub_timelock.csv_with_height)
-                        || (timelock_info.cltv_with_time && sub_timelock.cltv_with_height)
-                        || (timelock_info.cltv_with_height && sub_timelock.cltv_with_time);
+                // that conflicts with this one, set `contains_combination`.
+                if k > 1 {
+                    let height_and_time = (acc.csv_with_height && t.csv_with_time)
+                        || (acc.csv_with_time && t.csv_with_height)
+                        || (acc.cltv_with_time && t.cltv_with_height)
+                        || (acc.cltv_with_height && t.cltv_with_time);
+
+                    acc.contains_combination |= height_and_time;
                 }
-                timelock_info.csv_with_height |= sub_timelock.csv_with_height;
-                timelock_info.csv_with_time |= sub_timelock.csv_with_time;
-                timelock_info.cltv_with_height |= sub_timelock.cltv_with_height;
-                timelock_info.cltv_with_time |= sub_timelock.cltv_with_time;
-                timelock_info.contains_combination |= sub_timelock.contains_combination;
-                timelock_info
-            },
-        )
+                acc.csv_with_height |= t.csv_with_height;
+                acc.csv_with_time |= t.csv_with_time;
+                acc.cltv_with_height |= t.cltv_with_height;
+                acc.cltv_with_time |= t.cltv_with_time;
+                acc.contains_combination |= t.contains_combination;
+                acc
+            })
+    }
+}
+
+/// Structure representing the satisfaction or dissatisfaction size of a fragment.
+///
+/// All ECDSA signatures are assumed to be 73 bytes in size (including the length
+/// prefix if it's a witness element, or push opcode if it's a script push) and
+/// its sighash byte.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct SatData {
+    /// The maximum size, in bytes, of the witness stack.
+    ///
+    /// Includes the length prefixes for the individual elements but NOT the length
+    /// prefix for the whole stack.
+    pub max_witness_stack_size: usize,
+    /// The maximum number of elements on the witness stack.
+    pub max_witness_stack_count: usize,
+    /// The maximum size, in bytes, of the `scriptSig`.
+    ///
+    /// Does NOT include the length prefix.
+    pub max_script_sig_size: usize,
+    /// Maximum number of stack and altstack elements at any point during execution.
+    ///
+    /// This does **not** include initial witness elements. This element only captures
+    /// the additional elements that are pushed during execution.
+    pub max_exec_stack_count: usize,
+    /// The maximum number of executed, non-push opcodes. Irrelevant in Taproot context.
+    pub max_exec_op_count: usize,
+}
+
+impl SatData {
+    fn fieldwise_max(self, other: Self) -> Self {
+        Self {
+            max_witness_stack_count: cmp::max(
+                self.max_witness_stack_count,
+                other.max_witness_stack_count,
+            ),
+            max_witness_stack_size: cmp::max(
+                self.max_witness_stack_size,
+                other.max_witness_stack_size,
+            ),
+            max_script_sig_size: cmp::max(self.max_script_sig_size, other.max_script_sig_size),
+            max_exec_stack_count: cmp::max(self.max_exec_stack_count, other.max_exec_stack_count),
+            max_exec_op_count: cmp::max(self.max_exec_op_count, other.max_exec_op_count),
+        }
+    }
+
+    fn fieldwise_max_opt(slf: Option<Self>, other: Option<Self>) -> Option<Self> {
+        match (slf, other) {
+            (None, None) => None,
+            (Some(x), None) => Some(x),
+            (None, Some(x)) => Some(x),
+            (Some(x), Some(y)) => Some(x.fieldwise_max(y)),
+        }
     }
 }
 
@@ -101,118 +147,174 @@ pub struct ExtData {
     pub pk_cost: usize,
     /// Whether this fragment can be verify-wrapped for free
     pub has_free_verify: bool,
-    /// The worst case static(unexecuted) ops-count for this Miniscript fragment.
-    pub ops_count_static: usize,
-    /// The worst case ops-count for satisfying this Miniscript fragment.
-    pub ops_count_sat: Option<usize>,
-    /// The worst case ops-count for dissatisfying this Miniscript fragment.
-    pub ops_count_nsat: Option<usize>,
-    /// The worst case number of stack elements for satisfying this Miniscript fragment.
-    pub stack_elem_count_sat: Option<usize>,
-    /// The worst case number of stack elements for dissatisfying this Miniscript fragment.
-    pub stack_elem_count_dissat: Option<usize>,
-    /// Maximum size, in bytes, of a satisfying witness. First elements is the cost for the
-    /// witness stack, the second one is the cost for scriptSig.
-    /// All signatures are assumed to be 73 bytes in size, including the
-    /// length prefix (segwit) or push opcode (pre-segwit) and sighash
-    /// postfix.
-    pub max_sat_size: Option<(usize, usize)>,
-    /// Maximum dissatisfaction cost, in bytes, of a Miniscript fragment. First elements is
-    /// the cost for the witness stack, the second one is the cost for scriptSig.
-    pub max_dissat_size: Option<(usize, usize)>,
+    /// Static (executed + unexecuted) number of opcodes for the fragment. Irrelevant in Taproot
+    /// context.
+    pub static_ops: usize,
+    /// Various worst-case values for the satisfaction case.
+    pub sat_data: Option<SatData>,
+    /// Various worst-case values for the dissatisfaction case.
+    pub dissat_data: Option<SatData>,
     /// The timelock info about heightlocks and timelocks
-    pub timelock_info: TimeLockInfo,
-    /// Maximum stack + alt stack size during satisfaction execution
-    /// This does **not** include initial witness elements. This element only captures
-    /// the additional elements that are pushed during execution.
-    pub exec_stack_elem_count_sat: Option<usize>,
-    /// Maximum stack + alt stack size during dissat execution
-    /// This does **not** include initial witness elements. This element only captures
-    /// the additional elements that are pushed during execution.
-    pub exec_stack_elem_count_dissat: Option<usize>,
+    pub timelock_info: TimelockInfo,
+    /// The miniscript tree depth/height of this node.
+    /// Used for checking the max depth of the miniscript tree to prevent stack overflow.
+    pub tree_height: usize,
 }
 
-impl Property for ExtData {
-    fn sanity_checks(&self) {
-        debug_assert_eq!(
-            self.stack_elem_count_sat.is_some(),
-            self.exec_stack_elem_count_sat.is_some()
-        );
-        debug_assert_eq!(
-            self.stack_elem_count_dissat.is_some(),
-            self.exec_stack_elem_count_dissat.is_some()
-        );
-    }
+impl ExtData {
+    /// Extra data for the `0` combinator
+    pub const FALSE: Self = ExtData {
+        pk_cost: 1,
+        has_free_verify: false,
+        static_ops: 0,
+        sat_data: None,
+        dissat_data: Some(SatData {
+            max_witness_stack_size: 0,
+            max_witness_stack_count: 0,
+            max_script_sig_size: 0,
+            max_exec_stack_count: 1,
+            max_exec_op_count: 0,
+        }),
+        timelock_info: TimelockInfo::new(),
+        tree_height: 0,
+    };
 
-    fn from_true() -> Self {
-        ExtData {
-            pk_cost: 1,
+    /// Extra data for the `1` combinator
+    pub const TRUE: Self = ExtData {
+        pk_cost: 1,
+        has_free_verify: false,
+        static_ops: 0,
+        sat_data: Some(SatData {
+            max_witness_stack_size: 0,
+            max_witness_stack_count: 0,
+            max_script_sig_size: 0,
+            max_exec_stack_count: 1,
+            max_exec_op_count: 0,
+        }),
+        dissat_data: None,
+        timelock_info: TimelockInfo::new(),
+        tree_height: 0,
+    };
+}
+
+impl ExtData {
+    /// Resource bounds for a CTV predicate and its final DROP.
+    pub const fn tx_template() -> Self {
+        Self {
+            pk_cost: 35,
             has_free_verify: false,
-            ops_count_static: 0,
-            ops_count_sat: Some(0),
-            ops_count_nsat: None,
-            stack_elem_count_sat: Some(0),
-            stack_elem_count_dissat: None,
-            max_sat_size: Some((0, 0)),
-            max_dissat_size: None,
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(1),
-            exec_stack_elem_count_dissat: None,
+            static_ops: 2,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 0,
+                max_witness_stack_count: 0,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 1,
+                max_exec_op_count: 0,
+            }),
+            dissat_data: None,
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_false() -> Self {
+    /// Account for unexecuted inscription envelopes without changing witness needs.
+    pub fn inscribing(mut self, inscriptions: &[crate::ord::Inscription], postfix: bool) -> Self {
+        self.pk_cost += inscriptions.iter().map(|i| i.size_guess()).sum::<usize>();
+        self.static_ops += 2 * inscriptions.len();
+        self.tree_height += 1;
+        if postfix {
+            self.has_free_verify = false;
+        }
+        for data in [&mut self.sat_data, &mut self.dissat_data]
+            .into_iter()
+            .flatten()
+        {
+            data.max_exec_stack_count = if postfix {
+                data.max_exec_stack_count + 1
+            } else {
+                cmp::max(data.max_exec_stack_count, 1)
+            };
+        }
+        self
+    }
+
+    /// Confirm invariants of the extra property checker.
+    pub fn sanity_checks(&self) {}
+
+    /// Extra properties for the `pk_k` fragment.
+    ///
+    /// The key must be provided to determine its size.
+    pub fn pk_k<Pk: MiniscriptKey, Ctx: ScriptContext>(pk: &Pk) -> Self {
+        let (key_bytes, max_sig_bytes) = match Ctx::sig_type() {
+            crate::SigType::Ecdsa if pk.is_uncompressed() => (65, 73),
+            crate::SigType::Ecdsa => (34, 73),
+            crate::SigType::Schnorr => (33, 66),
+        };
+
         ExtData {
-            pk_cost: 1,
+            pk_cost: key_bytes,
             has_free_verify: false,
-            ops_count_static: 0,
-            ops_count_sat: None,
-            ops_count_nsat: Some(0),
-            stack_elem_count_sat: None,
-            stack_elem_count_dissat: Some(0),
-            max_sat_size: None,
-            max_dissat_size: Some((0, 0)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: None,
-            exec_stack_elem_count_dissat: Some(1),
+            static_ops: 0,
+            sat_data: Some(SatData {
+                max_witness_stack_size: max_sig_bytes,
+                max_witness_stack_count: 1,
+                max_script_sig_size: max_sig_bytes,
+                max_exec_stack_count: 1, // pushes the pk
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 1,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 1,
+                max_exec_stack_count: 1, // pushes the pk
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::default(),
+            tree_height: 0,
         }
     }
 
-    fn from_pk_k() -> Self {
-        ExtData {
-            pk_cost: 34,
-            has_free_verify: false,
-            ops_count_static: 0,
-            ops_count_sat: Some(0),
-            ops_count_nsat: Some(0),
-            stack_elem_count_sat: Some(1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: Some((73, 73)),
-            max_dissat_size: Some((1, 1)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(1), // pushes the pk
-            exec_stack_elem_count_dissat: Some(1),
-        }
-    }
+    /// Extra properties for the `pk_h` fragment.
+    ///
+    /// If the key is known, it should be provided to gain a size estimate from
+    /// it. If not, the worst-case for the context will be assumed.
+    pub fn pk_h<Pk: MiniscriptKey, Ctx: ScriptContext>(pk: Option<&Pk>) -> Self {
+        // With a raw pkh we don't know the preimage size so we have to assume the worst.
+        // FIXME with ValidationParams we will be able to determine if Ctx is Segwitv0 and exclude uncompressed keys.
+        let (key_bytes, max_sig_bytes) = match (Ctx::sig_type(), pk) {
+            (crate::SigType::Ecdsa, Some(pk)) if pk.is_uncompressed() => (65, 73),
+            (crate::SigType::Ecdsa, _) => (34, 73),
+            (crate::SigType::Schnorr, _) => (33, 66),
+        };
 
-    fn from_pk_h() -> Self {
         ExtData {
             pk_cost: 24,
             has_free_verify: false,
-            ops_count_static: 3,
-            ops_count_sat: Some(3),
-            ops_count_nsat: Some(3),
-            stack_elem_count_sat: Some(2),
-            stack_elem_count_dissat: Some(2),
-            max_sat_size: Some((34 + 73, 34 + 73)),
-            max_dissat_size: Some((35, 35)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // dup and hash push
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 3,
+            sat_data: Some(SatData {
+                max_witness_stack_size: key_bytes + max_sig_bytes,
+                max_witness_stack_count: 2,
+                max_script_sig_size: key_bytes + max_sig_bytes,
+                max_exec_stack_count: 2, // dup and hash push
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: key_bytes + 1,
+                max_witness_stack_count: 2,
+                max_script_sig_size: key_bytes + 1,
+                max_exec_stack_count: 2, // dup and hash push
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::default(),
+            tree_height: 0,
         }
     }
 
-    fn from_multi(k: usize, n: usize) -> Self {
+    /// Extra properties for the `multi` fragment.
+    pub fn multi<Pk: MiniscriptKey>(
+        thresh: &crate::Threshold<Pk, MAX_PUBKEYS_PER_MULTISIG>,
+    ) -> Self {
+        let (n, k) = (thresh.n(), thresh.k());
         let num_cost = match (k > 16, n > 16) {
             (true, true) => 4,
             (false, true) => 3,
@@ -220,22 +322,36 @@ impl Property for ExtData {
             (false, false) => 2,
         };
         ExtData {
-            pk_cost: num_cost + 34 * n + 1,
+            pk_cost: num_cost
+                + thresh
+                    .iter()
+                    .map(|k| if k.is_uncompressed() { 65 } else { 34 })
+                    .sum::<usize>()
+                + 1,
             has_free_verify: true,
-            ops_count_static: 1,
-            ops_count_sat: Some(n + 1),
-            ops_count_nsat: Some(n + 1),
-            stack_elem_count_sat: Some(k + 1),
-            stack_elem_count_dissat: Some(k + 1),
-            max_sat_size: Some((1 + 73 * k, 1 + 73 * k)),
-            max_dissat_size: Some((1 + k, 1 + k)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(n), // n pks
-            exec_stack_elem_count_dissat: Some(n),
+            static_ops: 1,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 1 + 73 * k,
+                max_witness_stack_count: k + 1,
+                max_script_sig_size: 1 + 73 * k,
+                max_exec_stack_count: n, // n pks
+                // Multi is the only fragment which has additional executed opcodes to count.
+                max_exec_op_count: n,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 1 + k,
+                max_witness_stack_count: k + 1,
+                max_script_sig_size: 1 + k,
+                max_exec_stack_count: n, // n pks
+                max_exec_op_count: n,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_multi_a(k: usize, n: usize) -> Self {
+    /// Extra properties for the `multi_a` fragment.
+    pub fn multi_a(k: usize, n: usize) -> Self {
         let num_cost = match (k > 16, n > 16) {
             (true, true) => 4,
             (false, true) => 3,
@@ -243,969 +359,724 @@ impl Property for ExtData {
             (false, false) => 2,
         };
         ExtData {
-            pk_cost: num_cost + 33 * n /*pks*/ + (n-1) /*checksigadds*/ + 1,
+            pk_cost: num_cost + 33 * n /*pks*/ + (n - 1) /*checksigadds*/ + 1,
             has_free_verify: true,
-            ops_count_static: 1, // We don't care about opcounts in tapscript
-            ops_count_sat: Some(n + 1),
-            ops_count_nsat: Some(n + 1),
-            stack_elem_count_sat: Some(n),
-            stack_elem_count_dissat: Some(n),
-            max_sat_size: Some(((n - k) + 64 * k, (n - k) + 64 * k)),
-            max_dissat_size: Some((n, n)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // the two nums before num equal verify
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 0, // irrelevant; no ops limit in Taproot
+            sat_data: Some(SatData {
+                max_witness_stack_size: (n - k) + 66 * k,
+                max_witness_stack_count: n,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 2, // the two nums before num equal verify
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: n,
+                max_witness_stack_count: n,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 2, // the two nums before num equal verify
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_hash() -> Self {
-        //never called directly
-        unreachable!()
-    }
-
-    fn from_sha256() -> Self {
+    /// Extra properties for the `sha256` fragment.
+    pub const fn sha256() -> Self {
         ExtData {
             pk_cost: 33 + 6,
             has_free_verify: true,
-            ops_count_static: 4,
-            ops_count_sat: Some(4),
-            ops_count_nsat: Some(4),
-            stack_elem_count_sat: Some(1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: Some((33, 33)),
-            max_dissat_size: Some((33, 33)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // either size <32> or <hash256> <32 byte>
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 4,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 2,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_txtemplate() -> Self {
-        ExtData {
-            pk_cost: 33 + 2,
-            has_free_verify: false,
-            ops_count_static: 3,
-            ops_count_sat: Some(3),
-            ops_count_nsat: None,
-            max_sat_size: Some((0, 0)),
-            stack_elem_count_sat: Some(0),
-            stack_elem_count_dissat: None,
-            max_dissat_size: None,
-            // TODO: Correct this to read from the template
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(1),
-            exec_stack_elem_count_dissat: None,
-        }
-    }
-
-    fn from_hash256() -> Self {
+    /// Extra properties for the `hash256` fragment.
+    pub const fn hash256() -> Self {
         ExtData {
             pk_cost: 33 + 6,
             has_free_verify: true,
-            ops_count_static: 4,
-            ops_count_sat: Some(4),
-            ops_count_nsat: Some(4),
-            stack_elem_count_sat: Some(1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: Some((33, 33)),
-            max_dissat_size: Some((33, 33)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // either size <32> or <hash256> <32 byte>
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 4,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 2,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_ripemd160() -> Self {
+    /// Extra properties for the `ripemd160` fragment.
+    pub const fn ripemd160() -> Self {
         ExtData {
             pk_cost: 21 + 6,
             has_free_verify: true,
-            ops_count_static: 4,
-            ops_count_sat: Some(4),
-            ops_count_nsat: Some(4),
-            stack_elem_count_sat: Some(1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: Some((33, 33)),
-            max_dissat_size: Some((33, 33)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // either size <32> or <hash256> <20 byte>
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 4,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 2,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_hash160() -> Self {
+    /// Extra properties for the `hash160` fragment.
+    pub const fn hash160() -> Self {
         ExtData {
             pk_cost: 21 + 6,
             has_free_verify: true,
-            ops_count_static: 4,
-            ops_count_sat: Some(4),
-            ops_count_nsat: Some(4),
-            stack_elem_count_sat: Some(1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: Some((33, 33)),
-            max_dissat_size: Some((33, 33)),
-            timelock_info: TimeLockInfo::default(),
-            exec_stack_elem_count_sat: Some(2), // either size <32> or <hash256> <20 byte>
-            exec_stack_elem_count_dissat: Some(2),
+            static_ops: 4,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 33,
+                max_witness_stack_count: 2,
+                max_script_sig_size: 33,
+                max_exec_stack_count: 2, // either size <32> or <sha256> <32 byte>
+                max_exec_op_count: 0,
+            }),
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
         }
     }
 
-    fn from_time(_t: u32) -> Self {
-        unreachable!()
-    }
-
-    fn from_after(t: u32) -> Self {
+    /// Extra properties for the `after` fragment.
+    pub fn after(t: AbsLockTime) -> Self {
         ExtData {
-            pk_cost: script_num_size(t as usize) + 1,
+            pk_cost: script_num_size(t.to_consensus_u32() as usize) + 1,
             has_free_verify: false,
-            ops_count_static: 1,
-            ops_count_sat: Some(1),
-            ops_count_nsat: None,
-            stack_elem_count_sat: Some(0),
-            stack_elem_count_dissat: None,
-            max_sat_size: Some((0, 0)),
-            max_dissat_size: None,
-            timelock_info: TimeLockInfo {
+            static_ops: 1,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 0,
+                max_witness_stack_count: 0,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 1, // <t>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: None,
+            timelock_info: TimelockInfo {
                 csv_with_height: false,
                 csv_with_time: false,
-                cltv_with_height: t < HEIGHT_TIME_THRESHOLD,
-                cltv_with_time: t >= HEIGHT_TIME_THRESHOLD,
+                cltv_with_height: t.is_block_height(),
+                cltv_with_time: t.is_block_time(),
                 contains_combination: false,
             },
-            exec_stack_elem_count_sat: Some(1), // <t>
-            exec_stack_elem_count_dissat: None,
+            tree_height: 0,
         }
     }
 
-    fn from_older(t: u32) -> Self {
+    /// Extra properties for the `older` fragment.
+    pub fn older(t: RelLockTime) -> Self {
         ExtData {
-            pk_cost: script_num_size(t as usize) + 1,
+            pk_cost: script_num_size(t.to_consensus_u32() as usize) + 1,
             has_free_verify: false,
-            ops_count_static: 1,
-            ops_count_sat: Some(1),
-            ops_count_nsat: None,
-            stack_elem_count_sat: Some(0),
-            stack_elem_count_dissat: None,
-            max_sat_size: Some((0, 0)),
-            max_dissat_size: None,
-            timelock_info: TimeLockInfo {
-                csv_with_height: (t & SEQUENCE_LOCKTIME_TYPE_FLAG) == 0,
-                csv_with_time: (t & SEQUENCE_LOCKTIME_TYPE_FLAG) != 0,
+            static_ops: 1,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 0,
+                max_witness_stack_count: 0,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 1, // <t>
+                max_exec_op_count: 0,
+            }),
+            dissat_data: None,
+            timelock_info: TimelockInfo {
+                csv_with_height: t.is_height_locked(),
+                csv_with_time: t.is_time_locked(),
                 cltv_with_height: false,
                 cltv_with_time: false,
                 contains_combination: false,
             },
-            exec_stack_elem_count_sat: Some(1), // <t>
-            exec_stack_elem_count_dissat: None,
+            tree_height: 0,
         }
     }
 
-    fn cast_alt(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `a:` fragment.
+    pub const fn cast_alt(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 2,
             has_free_verify: false,
-            ops_count_static: self.ops_count_static + 2,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 2),
-            ops_count_nsat: self.ops_count_nsat.map(|x| x + 2),
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: self.stack_elem_count_dissat,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: self.max_dissat_size,
+            static_ops: 2 + self.static_ops,
+            sat_data: self.sat_data,
+            dissat_data: self.dissat_data,
             timelock_info: self.timelock_info,
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_swap(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `s:` fragment.
+    pub const fn cast_swap(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 1,
             has_free_verify: self.has_free_verify,
-            ops_count_static: self.ops_count_static + 1,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 1),
-            ops_count_nsat: self.ops_count_nsat.map(|x| x + 1),
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: self.stack_elem_count_dissat,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: self.max_dissat_size,
+            static_ops: 1 + self.static_ops,
+            sat_data: self.sat_data,
+            dissat_data: self.dissat_data,
             timelock_info: self.timelock_info,
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_check(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `c:` fragment.
+    pub const fn cast_check(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 1,
             has_free_verify: true,
-            ops_count_static: self.ops_count_static + 1,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 1),
-            ops_count_nsat: self.ops_count_nsat.map(|x| x + 1),
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: self.stack_elem_count_dissat,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: self.max_dissat_size,
+            static_ops: 1 + self.static_ops,
+            sat_data: self.sat_data,
+            dissat_data: self.dissat_data,
             timelock_info: self.timelock_info,
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_dupif(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `d:` fragment.
+    pub fn cast_dupif(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 3,
             has_free_verify: false,
-            ops_count_static: self.ops_count_static + 3,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 3),
-            ops_count_nsat: Some(self.ops_count_static + 3),
-            stack_elem_count_sat: self.stack_elem_count_sat.map(|x| x + 1),
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: self.max_sat_size.map(|(w, s)| (w + 2, s + 1)),
-            max_dissat_size: Some((1, 1)),
+            static_ops: 3 + self.static_ops,
+            sat_data: self.sat_data.map(|data| SatData {
+                max_witness_stack_size: data.max_witness_stack_size + 1,
+                max_witness_stack_count: data.max_witness_stack_count + 2,
+                max_script_sig_size: data.max_script_sig_size + 1,
+                // Note: in practice this cmp::max always evaluates to data.max_exec_stack_count.
+                max_exec_stack_count: cmp::max(1, data.max_exec_stack_count),
+                max_exec_op_count: data.max_exec_op_count,
+            }),
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 1,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 1,
+                max_exec_stack_count: 1,
+                max_exec_op_count: 0,
+            }),
             timelock_info: self.timelock_info,
-            // Technically max(1, self.exec_stack_elem_count_sat), but all miniscript expressions
-            // that can be satisfied push at least one thing onto the stack.
-            // Even all V types push something onto the stack and then remove them
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: Some(1),
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_verify(self) -> Result<Self, ErrorKind> {
-        let verify_cost = if self.has_free_verify { 0 } else { 1 };
-        Ok(ExtData {
-            pk_cost: self.pk_cost + if self.has_free_verify { 0 } else { 1 },
+    /// Extra properties for the `v:` fragment.
+    pub fn cast_verify(self) -> Self {
+        let verify_cost = usize::from(!self.has_free_verify);
+        ExtData {
+            pk_cost: self.pk_cost + usize::from(!self.has_free_verify),
             has_free_verify: false,
-            ops_count_static: self.ops_count_static + verify_cost,
-            ops_count_sat: self.ops_count_sat.map(|x| x + verify_cost),
-            ops_count_nsat: None,
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: None,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: None,
+            static_ops: verify_cost + self.static_ops,
+            sat_data: self.sat_data,
+            dissat_data: None,
             timelock_info: self.timelock_info,
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: None,
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_nonzero(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `j:` fragment.
+    pub const fn cast_nonzero(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 4,
             has_free_verify: false,
-            ops_count_static: self.ops_count_static + 4,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 4),
-            ops_count_nsat: Some(self.ops_count_static + 4),
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: Some(1),
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: Some((1, 1)),
+            static_ops: 4 + self.static_ops,
+            sat_data: self.sat_data,
+            dissat_data: Some(SatData {
+                max_witness_stack_size: 1,
+                max_witness_stack_count: 1,
+                max_script_sig_size: 1,
+                max_exec_stack_count: 1,
+                max_exec_op_count: 0,
+            }),
             timelock_info: self.timelock_info,
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: Some(1),
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_zeronotequal(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `n:` fragment.
+    pub const fn cast_zeronotequal(self) -> Self {
+        ExtData {
             pk_cost: self.pk_cost + 1,
             has_free_verify: false,
-            ops_count_static: self.ops_count_static + 1,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 1),
-            ops_count_nsat: self.ops_count_nsat.map(|x| x + 1),
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: self.stack_elem_count_dissat,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: self.max_dissat_size,
+            static_ops: 1 + self.static_ops,
+            // Technically max_exec_stack_count should be max(1, self.max_exec_stack_count), but in practice
+            // this evaluates to the same thing, so to avoid opening self.sat_data, we just copy
+            // the whole thing. See `cast_dupif`.
+            sat_data: self.sat_data,
+            dissat_data: self.dissat_data,
             timelock_info: self.timelock_info,
-            // Technically max(1, self.exec_stack_elem_count_sat), same rationale as cast_dupif
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-        })
+            tree_height: self.tree_height + 1,
+        }
     }
 
-    fn cast_true(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
-            pk_cost: self.pk_cost + 1,
-            has_free_verify: false,
-            ops_count_static: self.ops_count_static,
-            ops_count_sat: self.ops_count_sat,
-            ops_count_nsat: None,
-            stack_elem_count_sat: self.stack_elem_count_sat,
-            stack_elem_count_dissat: None,
-            max_sat_size: self.max_sat_size,
-            max_dissat_size: None,
-            timelock_info: self.timelock_info,
-            // Technically max(1, self.exec_stack_elem_count_sat), same rationale as cast_dupif
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: None,
-        })
-    }
+    /// Cast by changing `[X]` to `AndV([X], True)`
+    pub fn cast_true(self) -> Self { Self::and_v(self, Self::TRUE) }
 
-    fn cast_or_i_false(self) -> Result<Self, ErrorKind> {
-        // never called directly
-        unreachable!()
-    }
+    /// Cast by changing `[X]` to `or_i([X], 0)`. Default implementation
+    /// simply passes through to `cast_or_i_false`
+    pub fn cast_unlikely(self) -> Self { Self::or_i(self, Self::FALSE) }
 
-    fn cast_unlikely(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
-            pk_cost: self.pk_cost + 4,
-            has_free_verify: false,
-            ops_count_static: self.ops_count_static + 3,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 3),
-            ops_count_nsat: Some(self.ops_count_static + 3),
-            stack_elem_count_sat: self.stack_elem_count_sat.map(|x| x + 1),
-            stack_elem_count_dissat: self.stack_elem_count_dissat.map(|x| x + 1),
-            max_sat_size: self.max_sat_size.map(|(w, s)| (w + 2, s + 1)),
-            max_dissat_size: self.max_dissat_size.map(|(w, s)| (w + 1, s + 1)),
-            // TODO: fix dissat stack elem counting above in a later commit
-            // Technically max(1, self.exec_stack_elem_count_sat), same rationale as cast_dupif
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-            timelock_info: self.timelock_info,
-        })
-    }
+    /// Cast by changing `[X]` to `or_i(0, [X])`. Default implementation
+    /// simply passes through to `cast_or_i_false`
+    pub fn cast_likely(self) -> Self { Self::or_i(Self::FALSE, self) }
 
-    fn cast_likely(self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
-            pk_cost: self.pk_cost + 4,
-            has_free_verify: false,
-            ops_count_static: self.ops_count_static + 3,
-            ops_count_sat: self.ops_count_sat.map(|x| x + 3),
-            ops_count_nsat: Some(self.ops_count_static + 3),
-            stack_elem_count_sat: self.stack_elem_count_sat.map(|x| x + 1),
-            stack_elem_count_dissat: self.stack_elem_count_dissat.map(|x| x + 1),
-            max_sat_size: self.max_sat_size.map(|(w, s)| (w + 1, s + 1)),
-            max_dissat_size: self.max_dissat_size.map(|(w, s)| (w + 2, s + 1)),
-            timelock_info: self.timelock_info,
-            // TODO: fix dissat stack elem counting above in a later commit
-            // Technically max(1, self.exec_stack_elem_count_sat), same rationale as cast_dupif
-            exec_stack_elem_count_sat: self.exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat: self.exec_stack_elem_count_dissat,
-        })
-    }
-
-    fn and_b(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `and_b` fragment.
+    pub fn and_b(l: Self, r: Self) -> Self {
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost + 1,
             has_free_verify: false,
-            ops_count_static: l.ops_count_static + r.ops_count_static + 1,
-            ops_count_sat: l
-                .ops_count_sat
-                .and_then(|x| r.ops_count_sat.map(|y| x + y + 1)),
-            ops_count_nsat: l
-                .ops_count_nsat
-                .and_then(|x| r.ops_count_nsat.map(|y| x + y + 1)),
-            stack_elem_count_sat: l
-                .stack_elem_count_sat
-                .and_then(|l| r.stack_elem_count_sat.map(|r| l + r)),
-            stack_elem_count_dissat: l
-                .stack_elem_count_dissat
-                .and_then(|l| r.stack_elem_count_dissat.map(|r| l + r)),
-            max_sat_size: l
-                .max_sat_size
-                .and_then(|(lw, ls)| r.max_sat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            max_dissat_size: l
-                .max_dissat_size
-                .and_then(|(lw, ls)| r.max_dissat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            timelock_info: TimeLockInfo::comb_and_timelocks(l.timelock_info, r.timelock_info),
-            // Left element leaves a stack result on the stack top and then right element is evaluated
-            // Therefore + 1 is added to execution size of second element
-            exec_stack_elem_count_sat: opt_max(
-                l.exec_stack_elem_count_sat,
-                r.exec_stack_elem_count_sat.map(|x| x + 1),
-            ),
-            exec_stack_elem_count_dissat: opt_max(
-                l.exec_stack_elem_count_dissat,
-                r.exec_stack_elem_count_dissat.map(|x| x + 1),
-            ),
-        })
+            static_ops: 1 + l.static_ops + r.static_ops,
+            sat_data: l.sat_data.zip(r.sat_data).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                // Left element leaves a stack result on the stack top and then right element is evaluated
+                // Therefore + 1 is added to execution size of second element
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, 1 + r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            }),
+            dissat_data: l.dissat_data.zip(r.dissat_data).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                // Left element leaves a stack result on the stack top and then right element is evaluated
+                // Therefore + 1 is added to execution size of second element
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, 1 + r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            }),
+            timelock_info: TimelockInfo::combine_and(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn and_v(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `and_v` fragment.
+    pub fn and_v(l: Self, r: Self) -> Self {
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost,
             has_free_verify: r.has_free_verify,
-            ops_count_static: l.ops_count_static + r.ops_count_static,
-            ops_count_sat: l.ops_count_sat.and_then(|x| r.ops_count_sat.map(|y| x + y)),
-            ops_count_nsat: None,
-            stack_elem_count_sat: l
-                .stack_elem_count_sat
-                .and_then(|l| r.stack_elem_count_sat.map(|r| l + r)),
-            stack_elem_count_dissat: None,
-            max_sat_size: l
-                .max_sat_size
-                .and_then(|(lw, ls)| r.max_sat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            max_dissat_size: None,
-            timelock_info: TimeLockInfo::comb_and_timelocks(l.timelock_info, r.timelock_info),
-            // [X] leaves no element after evaluation, hence this is the max
-            exec_stack_elem_count_sat: opt_max(
-                l.exec_stack_elem_count_sat,
-                r.exec_stack_elem_count_sat,
-            ),
-            exec_stack_elem_count_dissat: None,
-        })
+            static_ops: l.static_ops + r.static_ops,
+            sat_data: l.sat_data.zip(r.sat_data).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                // [X] leaves no element after evaluation, hence this is the max
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            }),
+            dissat_data: None,
+            timelock_info: TimelockInfo::combine_and(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn or_b(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `or_b` fragment.
+    pub fn or_b(l: Self, r: Self) -> Self {
+        let sat_concat = |l: Option<SatData>, r: Option<SatData>| {
+            l.zip(r).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                // Left element leaves a stack result on the stack top and then right element is evaluated
+                // Therefore + 1 is added to execution size of second element
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, 1 + r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            })
+        };
+
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost + 1,
             has_free_verify: false,
-            ops_count_static: l.ops_count_static + r.ops_count_static + 1,
-            ops_count_sat: cmp::max(
-                l.ops_count_sat
-                    .and_then(|x| r.ops_count_nsat.map(|y| y + x + 1)),
-                r.ops_count_sat
-                    .and_then(|x| l.ops_count_nsat.map(|y| y + x + 1)),
+            static_ops: 1 + l.static_ops + r.static_ops,
+            sat_data: SatData::fieldwise_max_opt(
+                sat_concat(l.sat_data, r.dissat_data),
+                sat_concat(l.dissat_data, r.sat_data),
             ),
-            ops_count_nsat: l
-                .ops_count_nsat
-                .and_then(|x| r.ops_count_nsat.map(|y| x + y + 1)),
-            stack_elem_count_sat: cmp::max(
-                l.stack_elem_count_sat
-                    .and_then(|l| r.stack_elem_count_dissat.map(|r| l + r)),
-                l.stack_elem_count_dissat
-                    .and_then(|l| r.stack_elem_count_sat.map(|r| l + r)),
-            ),
-            stack_elem_count_dissat: l
-                .stack_elem_count_dissat
-                .and_then(|l| r.stack_elem_count_dissat.map(|r| l + r)),
-            max_sat_size: cmp::max(
-                l.max_sat_size
-                    .and_then(|(lw, ls)| r.max_dissat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-                l.max_dissat_size
-                    .and_then(|(lw, ls)| r.max_sat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            ),
-            max_dissat_size: l
-                .max_dissat_size
-                .and_then(|(lw, ls)| r.max_dissat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            timelock_info: TimeLockInfo::comb_or_timelocks(l.timelock_info, r.timelock_info),
-            exec_stack_elem_count_sat: cmp::max(
-                opt_max(
-                    l.exec_stack_elem_count_sat,
-                    r.exec_stack_elem_count_dissat.map(|x| x + 1),
-                ),
-                opt_max(
-                    l.exec_stack_elem_count_dissat,
-                    r.exec_stack_elem_count_sat.map(|x| x + 1),
-                ),
-            ),
-            exec_stack_elem_count_dissat: opt_max(
-                l.exec_stack_elem_count_dissat,
-                r.exec_stack_elem_count_dissat.map(|x| x + 1),
-            ),
-        })
+            dissat_data: sat_concat(l.dissat_data, r.dissat_data),
+            timelock_info: TimelockInfo::combine_or(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn or_d(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        let res = ExtData {
+    /// Extra properties for the `or_d` fragment.
+    pub fn or_d(l: Self, r: Self) -> Self {
+        let sat_concat = |l: Option<SatData>, r: Option<SatData>| {
+            l.zip(r).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            })
+        };
+
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost + 3,
             has_free_verify: false,
-            ops_count_static: l.ops_count_static + r.ops_count_static + 1,
-            ops_count_sat: cmp::max(
-                l.ops_count_sat.map(|x| x + 3 + r.ops_count_static),
-                r.ops_count_sat
-                    .and_then(|x| l.ops_count_nsat.map(|y| y + x + 3)),
-            ),
-            ops_count_nsat: l
-                .ops_count_nsat
-                .and_then(|x| r.ops_count_nsat.map(|y| x + y + 3)),
-            stack_elem_count_sat: cmp::max(
-                l.stack_elem_count_sat,
-                l.stack_elem_count_dissat
-                    .and_then(|l_dis| r.stack_elem_count_sat.map(|r_sat| r_sat + l_dis)),
-            ),
-            stack_elem_count_dissat: l
-                .stack_elem_count_dissat
-                .and_then(|l_dis| r.stack_elem_count_dissat.map(|r_dis| r_dis + l_dis)),
-            max_sat_size: cmp::max(
-                l.max_sat_size,
-                l.max_dissat_size
-                    .and_then(|(lw, ls)| r.max_sat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            ),
-            max_dissat_size: l
-                .max_dissat_size
-                .and_then(|(lw, ls)| r.max_dissat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            timelock_info: TimeLockInfo::comb_or_timelocks(l.timelock_info, r.timelock_info),
-            exec_stack_elem_count_sat: cmp::max(
-                l.exec_stack_elem_count_sat,
-                opt_max(r.exec_stack_elem_count_sat, l.exec_stack_elem_count_dissat),
-            ),
-            exec_stack_elem_count_dissat: opt_max(
-                l.exec_stack_elem_count_dissat,
-                r.exec_stack_elem_count_dissat.map(|x| x + 1),
-            ),
-        };
-        Ok(res)
+            static_ops: 3 + l.static_ops + r.static_ops,
+            sat_data: SatData::fieldwise_max_opt(l.sat_data, sat_concat(l.dissat_data, r.sat_data)),
+            dissat_data: sat_concat(l.dissat_data, r.dissat_data),
+            timelock_info: TimelockInfo::combine_or(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn or_c(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `or_c` fragment.
+    pub fn or_c(l: Self, r: Self) -> Self {
+        let sat_concat = |l: Option<SatData>, r: Option<SatData>| {
+            l.zip(r).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            })
+        };
+
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost + 2,
             has_free_verify: false,
-            ops_count_static: l.ops_count_static + r.ops_count_static + 2,
-            ops_count_sat: cmp::max(
-                l.ops_count_sat.map(|x| x + 2 + r.ops_count_static),
-                r.ops_count_sat
-                    .and_then(|x| l.ops_count_nsat.map(|y| y + x + 2)),
-            ),
-            ops_count_nsat: None,
-            stack_elem_count_sat: cmp::max(
-                l.stack_elem_count_sat,
-                l.stack_elem_count_dissat
-                    .and_then(|l_dis| r.stack_elem_count_sat.map(|r_sat| r_sat + l_dis)),
-            ),
-            stack_elem_count_dissat: None,
-            max_sat_size: cmp::max(
-                l.max_sat_size,
-                l.max_dissat_size
-                    .and_then(|(lw, ls)| r.max_sat_size.map(|(rw, rs)| (lw + rw, ls + rs))),
-            ),
-            max_dissat_size: None,
-            timelock_info: TimeLockInfo::comb_or_timelocks(l.timelock_info, r.timelock_info),
-            exec_stack_elem_count_sat: cmp::max(
-                l.exec_stack_elem_count_sat,
-                opt_max(r.exec_stack_elem_count_sat, l.exec_stack_elem_count_dissat),
-            ),
-            exec_stack_elem_count_dissat: None,
-        })
+            static_ops: 2 + l.static_ops + r.static_ops,
+            sat_data: SatData::fieldwise_max_opt(l.sat_data, sat_concat(l.dissat_data, r.sat_data)),
+            dissat_data: None,
+            timelock_info: TimelockInfo::combine_or(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn or_i(l: Self, r: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `or_i` fragment.
+    pub fn or_i(l: Self, r: Self) -> Self {
+        let with_0 = |data: SatData| SatData {
+            max_witness_stack_count: 1 + data.max_witness_stack_count,
+            max_witness_stack_size: 1 + data.max_witness_stack_size,
+            max_script_sig_size: 1 + data.max_script_sig_size,
+            max_exec_stack_count: data.max_exec_stack_count,
+            max_exec_op_count: data.max_exec_op_count,
+        };
+        let with_1 = |data: SatData| SatData {
+            max_witness_stack_count: 1 + data.max_witness_stack_count,
+            max_witness_stack_size: 2 + data.max_witness_stack_size,
+            max_script_sig_size: 1 + data.max_script_sig_size,
+            max_exec_stack_count: data.max_exec_stack_count,
+            max_exec_op_count: data.max_exec_op_count,
+        };
+
+        ExtData {
             pk_cost: l.pk_cost + r.pk_cost + 3,
             has_free_verify: false,
-            ops_count_static: l.ops_count_static + r.ops_count_static + 3,
-            ops_count_sat: cmp::max(
-                l.ops_count_sat.map(|x| x + 3 + r.ops_count_static),
-                r.ops_count_sat.map(|x| x + 3 + l.ops_count_static),
+            static_ops: 3 + l.static_ops + r.static_ops,
+            sat_data: SatData::fieldwise_max_opt(l.sat_data.map(with_1), r.sat_data.map(with_0)),
+            dissat_data: SatData::fieldwise_max_opt(
+                l.dissat_data.map(with_1),
+                r.dissat_data.map(with_0),
             ),
-            ops_count_nsat: match (l.ops_count_nsat, r.ops_count_nsat) {
-                (Some(a), Some(b)) => Some(cmp::max(a, b) + 3),
-                (_, Some(x)) | (Some(x), _) => Some(x + 3),
-                (None, None) => None,
-            },
-            stack_elem_count_sat: match (l.stack_elem_count_sat, r.stack_elem_count_sat) {
-                (Some(l), Some(r)) => Some(1 + cmp::max(l, r)),
-                (Some(l), None) => Some(1 + l),
-                (None, Some(r)) => Some(1 + r),
-                (None, None) => None,
-            },
-            stack_elem_count_dissat: match (l.stack_elem_count_dissat, r.stack_elem_count_dissat) {
-                (Some(l), Some(r)) => Some(1 + cmp::max(l, r)),
-                (Some(l), None) => Some(1 + l),
-                (None, Some(r)) => Some(1 + r),
-                (None, None) => None,
-            },
-            max_sat_size: cmp::max(
-                l.max_sat_size.and_then(|(w, s)| Some((w + 2, s + 1))),
-                r.max_sat_size.and_then(|(w, s)| Some((w + 1, s + 1))),
-            ),
-            max_dissat_size: match (l.max_dissat_size, r.max_dissat_size) {
-                (Some(l), Some(r)) => {
-                    let max = cmp::max(l, r);
-                    Some((1 + max.0, 1 + max.1))
-                }
-                (None, Some(r)) => Some((1 + r.0, 1 + r.1)),
-                (Some(l), None) => Some((2 + l.0, 1 + l.1)),
-                (None, None) => None,
-            },
-            timelock_info: TimeLockInfo::comb_or_timelocks(l.timelock_info, r.timelock_info),
-            // TODO: fix elem count dissat bug
-            exec_stack_elem_count_sat: cmp::max(
-                l.exec_stack_elem_count_sat,
-                r.exec_stack_elem_count_sat,
-            ),
-            exec_stack_elem_count_dissat: cmp::max(
-                l.exec_stack_elem_count_dissat,
-                r.exec_stack_elem_count_dissat,
-            ),
-        })
+            timelock_info: TimelockInfo::combine_or(l.timelock_info, r.timelock_info),
+            tree_height: 1 + cmp::max(l.tree_height, r.tree_height),
+        }
     }
 
-    fn and_or(a: Self, b: Self, c: Self) -> Result<Self, ErrorKind> {
-        Ok(ExtData {
+    /// Extra properties for the `andor` fragment.
+    pub fn and_or(a: Self, b: Self, c: Self) -> Self {
+        let sat_concat = |l: Option<SatData>, r: Option<SatData>| {
+            l.zip(r).map(|(l, r)| SatData {
+                max_witness_stack_count: l.max_witness_stack_count + r.max_witness_stack_count,
+                max_witness_stack_size: l.max_witness_stack_size + r.max_witness_stack_size,
+                max_script_sig_size: l.max_script_sig_size + r.max_script_sig_size,
+                max_exec_stack_count: cmp::max(l.max_exec_stack_count, r.max_exec_stack_count),
+                max_exec_op_count: l.max_exec_op_count + r.max_exec_op_count,
+            })
+        };
+
+        ExtData {
             pk_cost: a.pk_cost + b.pk_cost + c.pk_cost + 3,
             has_free_verify: false,
-            ops_count_static: a.ops_count_static + b.ops_count_static + c.ops_count_static + 3,
-            ops_count_sat: cmp::max(
-                a.ops_count_sat
-                    .and_then(|x| b.ops_count_sat.map(|y| x + y + c.ops_count_static + 3)),
-                c.ops_count_sat
-                    .and_then(|z| a.ops_count_nsat.map(|y| y + z + b.ops_count_static + 3)),
+            static_ops: 3 + a.static_ops + b.static_ops + c.static_ops,
+            sat_data: SatData::fieldwise_max_opt(
+                sat_concat(a.sat_data, b.sat_data),
+                sat_concat(a.dissat_data, c.sat_data),
             ),
-            ops_count_nsat: c
-                .ops_count_nsat
-                .and_then(|z| a.ops_count_nsat.map(|x| x + b.ops_count_static + z + 3)),
-            stack_elem_count_sat: cmp::max(
-                a.stack_elem_count_sat
-                    .and_then(|a| b.stack_elem_count_sat.map(|b| b + a)),
-                a.stack_elem_count_dissat
-                    .and_then(|a_dis| c.stack_elem_count_sat.map(|c| c + a_dis)),
-            ),
-            stack_elem_count_dissat: a
-                .stack_elem_count_dissat
-                .and_then(|a_dis| c.stack_elem_count_dissat.map(|c| c + a_dis)),
-            max_sat_size: cmp::max(
-                a.max_sat_size
-                    .and_then(|(wa, sa)| b.max_sat_size.map(|(wb, sb)| (wa + wb, sa + sb))),
-                a.max_dissat_size
-                    .and_then(|(wa, sa)| c.max_sat_size.map(|(wc, sc)| (wa + wc, sa + sc))),
-            ),
-            max_dissat_size: a
-                .max_dissat_size
-                .and_then(|(wa, sa)| c.max_dissat_size.map(|(wc, sc)| (wa + wc, sa + sc))),
-            timelock_info: TimeLockInfo::comb_or_timelocks(
-                TimeLockInfo::comb_and_timelocks(a.timelock_info, b.timelock_info),
+            dissat_data: sat_concat(a.dissat_data, c.dissat_data),
+            timelock_info: TimelockInfo::combine_or(
+                TimelockInfo::combine_and(a.timelock_info, b.timelock_info),
                 c.timelock_info,
             ),
-            exec_stack_elem_count_sat: cmp::max(
-                opt_max(a.exec_stack_elem_count_sat, b.exec_stack_elem_count_sat),
-                opt_max(c.exec_stack_elem_count_sat, a.exec_stack_elem_count_dissat),
-            ),
-            exec_stack_elem_count_dissat: opt_max(
-                a.exec_stack_elem_count_dissat,
-                c.exec_stack_elem_count_dissat,
-            ),
-        })
+            tree_height: 1 + cmp::max(a.tree_height, cmp::max(b.tree_height, c.tree_height)),
+        }
     }
 
-    fn threshold<S>(k: usize, n: usize, mut sub_ck: S) -> Result<Self, ErrorKind>
+    /// Extra properties for the `thresh` fragment.
+    pub fn threshold<S>(k: usize, n: usize, mut sub_ck: S) -> Self
     where
-        S: FnMut(usize) -> Result<Self, ErrorKind>,
+        S: FnMut(usize) -> Self,
     {
         let mut pk_cost = 1 + script_num_size(k); //Equal and k
-        let mut ops_count_static = 0 as usize;
-        let mut ops_count_sat_vec = Vec::with_capacity(n);
-        let mut ops_count_nsat_sum = 0 as usize;
-        let mut ops_count_nsat = Some(0);
-        let mut ops_count_sat = Some(0);
-        let mut sat_count = 0;
+        let mut static_ops = 0;
         let mut timelocks = Vec::with_capacity(n);
-        let mut stack_elem_count_sat_vec = Vec::with_capacity(n);
-        let mut stack_elem_count_sat = Some(0);
-        let mut stack_elem_count_dissat = Some(0);
-        let mut max_sat_size_vec = Vec::with_capacity(n);
-        let mut max_sat_size = Some((0, 0));
-        let mut max_dissat_size = Some((0, 0));
-        // the max element count is same as max sat element count when satisfying one element + 1
-        let mut exec_stack_elem_count_sat_vec = Vec::with_capacity(n);
-        let mut exec_stack_elem_count_sat = Some(0);
-        let mut exec_stack_elem_count_dissat = Some(0);
+        let mut max_child_height = 0;
 
+        let mut sat_dissat_vec = Vec::<(Option<SatData>, Option<SatData>)>::with_capacity(n);
+
+        let mut dissat_data = Some(SatData {
+            max_witness_stack_count: 0,
+            max_witness_stack_size: 0,
+            max_script_sig_size: 0,
+            max_exec_stack_count: 0,
+            max_exec_op_count: 0,
+        });
         for i in 0..n {
-            let sub = sub_ck(i)?;
+            let sub = sub_ck(i);
 
             pk_cost += sub.pk_cost;
-            ops_count_static += sub.ops_count_static;
+            static_ops += sub.static_ops;
             timelocks.push(sub.timelock_info);
 
-            if let Some(n_items) = sub.stack_elem_count_dissat {
-                stack_elem_count_dissat = stack_elem_count_dissat.map(|x| x + n_items);
-                let sub_dissat_size = sub
-                    .max_dissat_size
-                    .expect("dissat_size is None but not stack_elem?");
-                max_dissat_size =
-                    max_dissat_size.map(|(w, s)| (w + sub_dissat_size.0, s + sub_dissat_size.1));
-            } else {
-                // The thresh is dissatifiable iff all sub policies are dissatifiable
-                stack_elem_count_dissat = None;
-            }
-            stack_elem_count_sat_vec.push((sub.stack_elem_count_sat, sub.stack_elem_count_dissat));
-            max_sat_size_vec.push((sub.max_sat_size, sub.max_sat_size));
+            // The thresh is dissatifiable iff all sub policies are dissatifiable.
+            // If it can be dissatisfied this is done by just dissatisfying everything in order.
+            dissat_data = dissat_data.zip(sub.dissat_data).map(|(acc, sub)| SatData {
+                max_witness_stack_count: acc.max_witness_stack_count + sub.max_witness_stack_count,
+                max_witness_stack_size: acc.max_witness_stack_size + sub.max_witness_stack_size,
+                max_script_sig_size: acc.max_script_sig_size + sub.max_script_sig_size,
+                max_exec_stack_count: cmp::max(acc.max_exec_stack_count, sub.max_exec_stack_count),
+                max_exec_op_count: acc.max_exec_op_count + sub.max_exec_op_count,
+            });
+            // Satisfaction is more complicated.
+            sat_dissat_vec.push((sub.sat_data, sub.dissat_data));
 
-            match (sub.ops_count_sat, sub.ops_count_nsat) {
-                (Some(x), Some(y)) => {
-                    ops_count_sat_vec.push(Some(x as i32 - y as i32));
-                    ops_count_nsat = ops_count_nsat.map(|v| y + v);
-                    ops_count_nsat_sum = ops_count_nsat_sum + y;
-                }
-                (Some(x), None) => {
-                    sat_count = sat_count + 1;
-                    ops_count_sat = ops_count_sat.map(|y| x + y);
-                    ops_count_nsat = None;
-                }
-                _ => {}
-            }
-            exec_stack_elem_count_sat_vec.push((
-                sub.exec_stack_elem_count_sat,
-                sub.exec_stack_elem_count_dissat,
-            ));
-            exec_stack_elem_count_dissat = opt_max(
-                exec_stack_elem_count_dissat,
-                sub.exec_stack_elem_count_dissat,
-            );
+            max_child_height = cmp::max(max_child_height, sub.tree_height);
         }
 
-        // We sort by [satisfaction cost - dissatisfaction cost] to make a worst-case (the most
-        // costy satisfaction are satisfied, the most costy dissatisfactions are dissatisfied)
-        // sum of the cost by iterating through the sorted vector *backward*.
-        stack_elem_count_sat_vec.sort_by(|a, b| {
-            a.0.map(|x| a.1.map(|y| x as isize - y as isize))
-                .cmp(&b.0.map(|x| b.1.map(|y| x as isize - y as isize)))
-        });
-        for (i, &(x, y)) in stack_elem_count_sat_vec.iter().rev().enumerate() {
-            stack_elem_count_sat = if i <= k {
-                x.and_then(|x| stack_elem_count_sat.map(|count| count + x))
-            } else {
-                y.and_then(|y| stack_elem_count_sat.map(|count| count + y))
-            };
+        let mut max_witness_stack_count = None;
+        let mut max_witness_stack_size = None;
+        let mut max_script_sig_size = None;
+        let mut max_exec_stack_count = None;
+        let mut max_exec_op_count = None;
+        for (field, proj, cmp) in [
+            (
+                &mut max_witness_stack_count,
+                &(|data: SatData| data.max_witness_stack_count) as &dyn Fn(_) -> usize,
+                &(|acc: usize, x: usize| acc + x) as &dyn Fn(_, _) -> usize,
+            ),
+            (
+                &mut max_witness_stack_size,
+                &(|data: SatData| data.max_witness_stack_size) as &dyn Fn(_) -> usize,
+                &(|acc: usize, x: usize| acc + x) as &dyn Fn(_, _) -> usize,
+            ),
+            (
+                &mut max_script_sig_size,
+                &(|data: SatData| data.max_script_sig_size) as &dyn Fn(_) -> usize,
+                &(|acc: usize, x: usize| acc + x) as &dyn Fn(_, _) -> usize,
+            ),
+            (
+                &mut max_exec_stack_count,
+                &(|data: SatData| data.max_exec_stack_count) as &dyn Fn(_) -> usize,
+                // For each fragment except the first, we have the accumulated count on the
+                // stack, which sits there during the whole child execution before
+                // being ADDed to the result at the end.
+                //
+                // We use "acc > 0" as a hacky way to check "is this the first child
+                // or not".
+                &(|acc: usize, x: usize| cmp::max(acc, x + usize::from(acc > 0)))
+                    as &dyn Fn(_, _) -> usize,
+            ),
+            (
+                &mut max_exec_op_count,
+                &(|data: SatData| data.max_exec_op_count) as &dyn Fn(_) -> usize,
+                &(|acc: usize, x: usize| acc + x) as &dyn Fn(_, _) -> usize,
+            ),
+        ] {
+            sat_dissat_vec.sort_by_key(|(sat, dissat)| {
+                sat.zip(*dissat)
+                    .map(|(sat, dissat)| proj(sat) as isize - proj(dissat) as isize)
+            });
+            *field =
+                sat_dissat_vec
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .try_fold(0, |acc, (i, &(sat, dissat))| {
+                        if i <= k {
+                            sat.map(|x| cmp(acc, proj(x)))
+                        } else {
+                            dissat.map(|y| cmp(acc, proj(y)))
+                        }
+                    });
         }
 
-        // Same logic as above
-        exec_stack_elem_count_sat_vec.sort_by(|a, b| {
-            a.0.map(|x| a.1.map(|y| x as isize - y as isize))
-                .cmp(&b.0.map(|x| b.1.map(|y| x as isize - y as isize)))
-        });
-        for (i, &(x, y)) in exec_stack_elem_count_sat_vec.iter().rev().enumerate() {
-            exec_stack_elem_count_sat = if i <= k {
-                opt_max(exec_stack_elem_count_sat, x)
-            } else {
-                opt_max(exec_stack_elem_count_sat, y)
-            };
-        }
-
-        // Same for the size cost. A bit more intricated as we need to account for both the witness
-        // and scriptSig cost, so we end up with a tuple of Options of tuples. We use the witness
-        // cost (first element of the mentioned tuple) here.
-        // FIXME: Maybe make the ExtData struct aware of Ctx and add a one_cost() method here ?
-        max_sat_size_vec.sort_by(|a, b| {
-            a.0.map(|x| a.1.map(|y| x.0 as isize - y.0 as isize))
-                .cmp(&b.0.map(|x| b.1.map(|y| x.0 as isize - y.0 as isize)))
-        });
-        for (i, &(x, y)) in max_sat_size_vec.iter().enumerate() {
-            max_sat_size = if i <= k {
-                x.and_then(|x| max_sat_size.map(|(w, s)| (w + x.0, s + x.1)))
-            } else {
-                y.and_then(|y| max_sat_size.map(|(w, s)| (w + y.0, s + y.1)))
-            };
-        }
-
-        let remaining_sat = k - sat_count;
-        let mut sum: i32 = 0;
-        if k < sat_count || ops_count_sat_vec.len() < remaining_sat {
-            ops_count_sat = None;
+        let sat_data = if let (
+            Some(max_witness_stack_count),
+            Some(max_witness_stack_size),
+            Some(max_script_sig_size),
+            Some(max_exec_stack_count),
+            Some(max_exec_op_count),
+        ) = (
+            max_witness_stack_count,
+            max_witness_stack_size,
+            max_script_sig_size,
+            max_exec_stack_count,
+            max_exec_op_count,
+        ) {
+            Some(SatData {
+                max_witness_stack_count,
+                max_witness_stack_size,
+                max_script_sig_size,
+                max_exec_stack_count,
+                max_exec_op_count,
+            })
         } else {
-            ops_count_sat_vec.sort();
-            ops_count_sat_vec.reverse();
-            sum = ops_count_sat_vec
-                .split_off(remaining_sat)
-                .iter()
-                .map(|z| z.unwrap())
-                .sum();
-        }
-        Ok(ExtData {
+            None
+        };
+
+        ExtData {
             pk_cost: pk_cost + n - 1, //all pk cost + (n-1)*ADD
             has_free_verify: true,
-            ops_count_static: ops_count_static + (n - 1) + 1, //adds and equal
-            ops_count_sat: ops_count_sat
-                .map(|x: usize| (x + (n - 1) + 1 + (sum + ops_count_nsat_sum as i32) as usize)), //adds and equal
-            ops_count_nsat: ops_count_nsat.map(|x| x + (n - 1) + 1), //adds and equal
-            stack_elem_count_sat,
-            stack_elem_count_dissat,
-            max_sat_size,
-            max_dissat_size,
-            timelock_info: TimeLockInfo::combine_thresh_timelocks(k, timelocks),
-            exec_stack_elem_count_sat,
-            exec_stack_elem_count_dissat,
-        })
+            static_ops: static_ops + 1 + (n - 1), // adds and equal
+            sat_data,
+            dissat_data,
+            timelock_info: TimelockInfo::combine_threshold(k, timelocks),
+            tree_height: max_child_height + 1,
+        }
     }
 
     /// Compute the type of a fragment assuming all the children of
     /// Miniscript have been computed already.
-    fn type_check<Pk, Ctx, C>(
-        fragment: &Terminal<Pk, Ctx>,
-        _child: C,
-    ) -> Result<Self, Error<Pk, Ctx>>
+    pub fn type_check<Pk, Ctx>(fragment: &Terminal<Pk, Ctx>) -> Self
     where
-        C: FnMut(usize) -> Option<Self>,
         Ctx: ScriptContext,
         Pk: MiniscriptKey,
     {
-        let wrap_err = |result: Result<Self, ErrorKind>| {
-            result.map_err(|kind| Error {
-                fragment: fragment.clone(),
-                error: kind,
-            })
-        };
-
         let ret = match *fragment {
-            Terminal::True => Ok(Self::from_true()),
-            Terminal::False => Ok(Self::from_false()),
-            Terminal::PkK(..) => Ok(Self::from_pk_k()),
-            Terminal::PkH(..) => Ok(Self::from_pk_h()),
-            Terminal::Multi(k, ref pks) | Terminal::MultiA(k, ref pks) => {
-                if k == 0 {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::ZeroThreshold,
-                    });
-                }
-                if k > pks.len() {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::OverThreshold(k, pks.len()),
-                    });
-                }
-                match *fragment {
-                    Terminal::Multi(..) => Ok(Self::from_multi(k, pks.len())),
-                    Terminal::MultiA(..) => Ok(Self::from_multi_a(k, pks.len())),
-                    _ => unreachable!(),
-                }
-            }
-            Terminal::After(t) => {
-                // Note that for CLTV this is a limitation not of Bitcoin but Miniscript. The
-                // number on the stack would be a 5 bytes signed integer but Miniscript's B type
-                // only consumes 4 bytes from the stack.
-                // #380
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::InvalidTime,
-                    });
-                }
-                Ok(Self::from_after(t))
-            }
-            Terminal::Older(t) => {
-                // #380
-                if t == 0 || (t & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::InvalidTime,
-                    });
-                }
-                Ok(Self::from_older(t))
-            }
-            Terminal::Sha256(..) => Ok(Self::from_sha256()),
-            Terminal::Hash256(..) => Ok(Self::from_hash256()),
-            Terminal::Ripemd160(..) => Ok(Self::from_ripemd160()),
-            Terminal::Hash160(..) => Ok(Self::from_hash160()),
-            Terminal::Alt(ref sub) => wrap_err(Self::cast_alt(sub.ext.clone())),
-            Terminal::Swap(ref sub) => wrap_err(Self::cast_swap(sub.ext.clone())),
-            Terminal::Check(ref sub) => wrap_err(Self::cast_check(sub.ext.clone())),
-            Terminal::DupIf(ref sub) => wrap_err(Self::cast_dupif(sub.ext.clone())),
-            Terminal::Verify(ref sub) => wrap_err(Self::cast_verify(sub.ext.clone())),
-            Terminal::NonZero(ref sub) => wrap_err(Self::cast_nonzero(sub.ext.clone())),
-            Terminal::ZeroNotEqual(ref sub) => wrap_err(Self::cast_zeronotequal(sub.ext.clone())),
+            Terminal::True => Self::TRUE,
+            Terminal::False => Self::FALSE,
+            Terminal::PkK(ref k) => Self::pk_k::<_, Ctx>(k),
+            Terminal::PkH(ref k) => Self::pk_h::<_, Ctx>(Some(k)),
+            Terminal::RawPkH(..) => Self::pk_h::<Pk, Ctx>(None),
+            Terminal::Multi(ref thresh) => Self::multi(thresh),
+            Terminal::MultiA(ref thresh) => Self::multi_a(thresh.k(), thresh.n()),
+            Terminal::After(t) => Self::after(t),
+            Terminal::Older(t) => Self::older(t),
+            Terminal::Sha256(..) => Self::sha256(),
+            Terminal::Hash256(..) => Self::hash256(),
+            Terminal::Ripemd160(..) => Self::ripemd160(),
+            Terminal::Hash160(..) => Self::hash160(),
+            Terminal::TxTemplate(..) => Self::tx_template(),
+            Terminal::InscribePre(ref i, ref sub) => sub.ext.inscribing(i, false),
+            Terminal::InscribePost(ref i, ref sub) => sub.ext.inscribing(i, true),
+            Terminal::Alt(ref sub) => Self::cast_alt(sub.ext),
+            Terminal::Swap(ref sub) => Self::cast_swap(sub.ext),
+            Terminal::Check(ref sub) => Self::cast_check(sub.ext),
+            Terminal::DupIf(ref sub) => Self::cast_dupif(sub.ext),
+            Terminal::Verify(ref sub) => Self::cast_verify(sub.ext),
+            Terminal::NonZero(ref sub) => Self::cast_nonzero(sub.ext),
+            Terminal::ZeroNotEqual(ref sub) => Self::cast_zeronotequal(sub.ext),
             Terminal::AndB(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::and_b(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::and_b(ltype, rtype)
             }
             Terminal::AndV(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::and_v(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::and_v(ltype, rtype)
             }
             Terminal::OrB(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::or_b(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::or_b(ltype, rtype)
             }
             Terminal::OrD(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::or_d(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::or_d(ltype, rtype)
             }
             Terminal::OrC(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::or_c(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::or_c(ltype, rtype)
             }
             Terminal::OrI(ref l, ref r) => {
-                let ltype = l.ext.clone();
-                let rtype = r.ext.clone();
-                wrap_err(Self::or_i(ltype, rtype))
+                let ltype = l.ext;
+                let rtype = r.ext;
+                Self::or_i(ltype, rtype)
             }
             Terminal::AndOr(ref a, ref b, ref c) => {
-                let atype = a.ext.clone();
-                let btype = b.ext.clone();
-                let ctype = c.ext.clone();
-                wrap_err(Self::and_or(atype, btype, ctype))
+                let atype = a.ext;
+                let btype = b.ext;
+                let ctype = c.ext;
+                Self::and_or(atype, btype, ctype)
             }
-            Terminal::Thresh(k, ref subs) => {
-                if k == 0 {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::ZeroThreshold,
-                    });
-                }
-                if k > subs.len() {
-                    return Err(Error {
-                        fragment: fragment.clone(),
-                        error: ErrorKind::OverThreshold(k, subs.len()),
-                    });
-                }
-
-                let res = Self::threshold(k, subs.len(), |n| Ok(subs[n].ext.clone()));
-
-                res.map_err(|kind| Error {
-                    fragment: fragment.clone(),
-                    error: kind,
-                })
-            }
-            Terminal::TxTemplate(..) => Ok(Self::from_txtemplate()),
-            Terminal::InscribePre(ref i, ref c) => wrap_err(Self::inscribing(i, c.ext)),
-            Terminal::InscribePost(ref i, ref c) => {
-                wrap_err(Self::inscribing(i, c.ext)).map(|mut ext| {
-                    if !i.is_empty() {
-                        // ENDIF cannot be combined with a following VERIFY.
-                        ext.has_free_verify = false;
-                        // The temporary FALSE follows the child's result. A V
-                        // fragment leaves no result; all other bases may do so.
-                        let stack_growth = if c.ty.corr.base == super::Base::V {
-                            1
-                        } else {
-                            2
-                        };
-                        ext.exec_stack_elem_count_sat = c
-                            .ext
-                            .exec_stack_elem_count_sat
-                            .map(|count| cmp::max(count, stack_growth));
-                        ext.exec_stack_elem_count_dissat = c
-                            .ext
-                            .exec_stack_elem_count_dissat
-                            .map(|count| cmp::max(count, stack_growth));
-                    }
-                    ext
-                })
+            Terminal::Thresh(ref thresh) => {
+                Self::threshold(thresh.k(), thresh.n(), |n| thresh.data()[n].ext)
             }
         };
-        if let Ok(ref ret) = ret {
-            ret.sanity_checks()
-        }
+        ret.sanity_checks();
         ret
     }
 
-    fn inscribing(
-        inscription: &Arc<Vec<crate::ord::Inscription>>,
-        mut r: Self,
-    ) -> Result<Self, ErrorKind> {
-        if inscription.is_empty() {
-            return Err(ErrorKind::InvalidInscription);
-        }
-        for item in inscription.iter() {
-            item.validate().map_err(|_| ErrorKind::InvalidInscription)?;
-        }
-        // Only IF and ENDIF count toward the legacy opcode limit. The
-        // canonical envelope contains only pushes in its unexecuted body.
-        let ops = 2 * inscription.len();
-        r.pk_cost += inscription.iter().map(|i| i.size_guess()).sum::<usize>();
-        r.ops_count_static += ops;
-        r.ops_count_sat = r.ops_count_sat.map(|count| count + ops);
-        r.ops_count_nsat = r.ops_count_nsat.map(|count| count + ops);
-        r.exec_stack_elem_count_sat = r.exec_stack_elem_count_sat.map(|count| cmp::max(count, 1));
-        r.exec_stack_elem_count_dissat = r
-            .exec_stack_elem_count_dissat
-            .map(|count| cmp::max(count, 1));
-        Ok(r)
+    /// Accessor for the sum of the static and executed op counts, in the satisfaction
+    /// case.
+    pub(crate) fn sat_op_count(&self) -> Option<usize> {
+        self.sat_data
+            .map(|data| self.static_ops + data.max_exec_op_count)
     }
 }
 
-// Returns Some(max(x,y)) is both x and y are Some. Otherwise, return none
-fn opt_max<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-    if let (Some(x), Some(y)) = (a, b) {
-        Some(cmp::max(x, y))
-    } else {
-        None
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_threshold() {
+        let mut time1 = TimelockInfo::default();
+        let mut time2 = TimelockInfo::default();
+        let mut height = TimelockInfo::default();
+
+        time1.csv_with_time = true;
+        time2.csv_with_time = true;
+        height.csv_with_height = true;
+
+        // For threshold of 1, multiple absolute timelocks do not effect spendable path.
+        let v = vec![time1, time2, height];
+        let combined = TimelockInfo::combine_threshold(1, v);
+        assert!(!combined.contains_unspendable_path());
+
+        // For threshold of 2, multiple absolute timelocks cannot be spent in a single path.
+        let v = vec![time1, time2, height];
+        let combined = TimelockInfo::combine_threshold(2, v);
+        assert!(combined.contains_unspendable_path())
     }
 }

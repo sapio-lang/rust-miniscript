@@ -1,21 +1,19 @@
-extern crate sapio_miniscript;
-
-use sapio_miniscript::bitcoin::{
-    blockdata::script::Builder, OutPoint, Script, Transaction, TxIn, Witness,
-};
-use sapio_miniscript::ord::{envelope::Envelope, Inscription};
+use miniscript::bitcoin::blockdata::script::Builder;
+use miniscript::bitcoin::{OutPoint, ScriptBuf as Script, Transaction, TxIn, Witness};
+use miniscript::ord::envelope::Envelope;
+use miniscript::ord::Inscription;
 
 fn transaction(witnesses: Vec<Vec<Vec<u8>>>) -> Transaction {
     Transaction {
-        version: 2,
-        lock_time: 0,
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
         input: witnesses
             .into_iter()
             .map(|witness| TxIn {
                 previous_output: OutPoint::null(),
                 script_sig: Script::new(),
-                sequence: 0xffff_ffff,
-                witness: Witness::from_vec(witness),
+                sequence: bitcoin::Sequence::MAX,
+                witness: Witness::from_slice(&witness),
             })
             .collect(),
         output: vec![],
@@ -107,20 +105,14 @@ fn unchunked_fields_obey_script_element_limit() {
                 5 => value.pointer = bytes,
                 _ => unreachable!(),
             }
-            assert_eq!(
-                value.validate().is_ok(),
-                size == 520,
-                "field={}, size={}",
-                field,
-                size
-            );
+            assert_eq!(value.validate().is_ok(), size == 520, "field={}, size={}", field, size);
         }
     }
 }
 
 #[test]
 fn large_body_and_metadata_roundtrip_as_bounded_pushes() {
-    use sapio_miniscript::bitcoin::blockdata::script::Instruction;
+    use miniscript::bitcoin::blockdata::script::Instruction;
 
     let mut value = inscription(&vec![42; 1041]);
     value.metadata = Some(vec![43; 1041]);

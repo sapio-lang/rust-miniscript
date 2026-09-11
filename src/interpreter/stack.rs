@@ -1,31 +1,22 @@
-// Miniscript
-// Written in 2020 by
-//     Sanket Kanjular and Andrew Poelstra
-//
-// To the extent possible under law, the author(s) have dedicated all
-// copyright and related and neighboring rights to this software to
-// the public domain worldwide. This software is distributed without
-// any warranty.
-//
-// You should have received a copy of the CC0 Public Domain Dedication
-// along with this software.
-// If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
-//
+// Written in 2020 by Sanket Kanjular and Andrew Poelstra
+// SPDX-License-Identifier: CC0-1.0
 
 //! Interpreter stack
 
-use bitcoin;
 use bitcoin::blockdata::{opcodes, script};
-use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
+use bitcoin::hashes::{hash160, ripemd160, sha256, Hash};
+use bitcoin::{absolute, relative, Sequence};
 
 use super::error::PkEvalErrInner;
-use super::{
-    verify_sersig, BitcoinKey, Error, HashLockType, KeySigPair, SatisfiedConstraint, TypedHash160,
-};
+use super::{verify_sersig, BitcoinKey, Error, HashLockType, KeySigPair, SatisfiedConstraint};
+use crate::hash256;
+use crate::miniscript::context::SigType;
+use crate::prelude::*;
 
 /// Definition of Stack Element of the Stack used for interpretation of Miniscript.
-/// All stack elements with vec![] go to Dissatisfied and vec![1] are marked to Satisfied.
-/// Others are directly pushed as witness
+///
+/// All stack elements with `vec![]` go to `Element::Dissatisfied` and `vec![1]` are marked to
+/// `Element::Satisfied`. Others are directly pushed as witness.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum Element<'txin> {
     /// Result of a satisfied Miniscript fragment
@@ -39,9 +30,7 @@ pub enum Element<'txin> {
 }
 
 impl<'txin> From<&'txin Vec<u8>> for Element<'txin> {
-    fn from(v: &'txin Vec<u8>) -> Element<'txin> {
-        From::from(&v[..])
-    }
+    fn from(v: &'txin Vec<u8>) -> Element<'txin> { From::from(&v[..]) }
 }
 
 impl<'txin> From<&'txin [u8]> for Element<'txin> {
@@ -65,7 +54,7 @@ impl<'txin> Element<'txin> {
     ) -> Result<Self, Error> {
         match ins {
             //Also covers the dissatisfied case as PushBytes0
-            Ok(script::Instruction::PushBytes(v)) => Ok(Element::from(v)),
+            Ok(script::Instruction::PushBytes(v)) => Ok(Element::from(v.as_bytes())),
             Ok(script::Instruction::Op(opcodes::all::OP_PUSHNUM_1)) => Ok(Element::Satisfied),
             _ => Err(Error::ExpectedPush),
         }
@@ -83,52 +72,32 @@ impl<'txin> Element<'txin> {
 
 /// Stack Data structure representing the stack input to Miniscript. This Stack
 /// is created from the combination of ScriptSig and Witness stack.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, Hash)]
 pub struct Stack<'txin>(Vec<Element<'txin>>);
 
 impl<'txin> From<Vec<Element<'txin>>> for Stack<'txin> {
-    fn from(v: Vec<Element<'txin>>) -> Self {
-        Stack(v)
-    }
-}
-
-impl<'txin> Default for Stack<'txin> {
-    fn default() -> Self {
-        Stack(vec![])
-    }
+    fn from(v: Vec<Element<'txin>>) -> Self { Stack(v) }
 }
 
 impl<'txin> Stack<'txin> {
     /// Whether the stack is empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
 
     /// Number of elements on the stack
-    pub fn len(&mut self) -> usize {
-        self.0.len()
-    }
+    pub fn len(&mut self) -> usize { self.0.len() }
 
     /// Removes the top stack element, if the stack is nonempty
-    pub fn pop(&mut self) -> Option<Element<'txin>> {
-        self.0.pop()
-    }
+    pub fn pop(&mut self) -> Option<Element<'txin>> { self.0.pop() }
 
     /// Pushes an element onto the top of the stack
-    pub fn push(&mut self, elem: Element<'txin>) -> () {
-        self.0.push(elem);
-    }
+    pub fn push(&mut self, elem: Element<'txin>) { self.0.push(elem); }
 
     /// Returns a new stack representing the top `k` elements of the stack,
     /// removing these elements from the original
-    pub fn split_off(&mut self, k: usize) -> Vec<Element<'txin>> {
-        self.0.split_off(k)
-    }
+    pub fn split_off(&mut self, k: usize) -> Vec<Element<'txin>> { self.0.split_off(k) }
 
     /// Returns a reference to the top stack element, if the stack is nonempty
-    pub fn last(&self) -> Option<&Element<'txin>> {
-        self.0.last()
-    }
+    pub fn last(&self) -> Option<&Element<'txin>> { self.0.last() }
 
     /// Helper function to evaluate a Pk Node which takes the
     /// top of the stack as input signature and validates it.
@@ -139,7 +108,7 @@ impl<'txin> Stack<'txin> {
     pub(super) fn evaluate_pk<'intp>(
         &mut self,
         verify_sig: &mut Box<dyn FnMut(&KeySigPair) -> bool + 'intp>,
-        pk: &'intp BitcoinKey,
+        pk: BitcoinKey,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         if let Some(sigser) = self.pop() {
             match sigser {
@@ -148,18 +117,16 @@ impl<'txin> Stack<'txin> {
                     None
                 }
                 Element::Push(sigser) => {
-                    let key_sig = verify_sersig(verify_sig, pk, sigser);
+                    let key_sig = verify_sersig(verify_sig, &pk, sigser);
                     match key_sig {
                         Ok(key_sig) => {
                             self.push(Element::Satisfied);
                             Some(Ok(SatisfiedConstraint::PublicKey { key_sig }))
                         }
-                        Err(e) => return Some(Err(e)),
+                        Err(e) => Some(Err(e)),
                     }
                 }
-                Element::Satisfied => {
-                    return Some(Err(Error::PkEvaluationError(PkEvalErrInner::from(*pk))));
-                }
+                Element::Satisfied => Some(Err(Error::PkEvaluationError(PkEvalErrInner::from(pk)))),
             }
         } else {
             Some(Err(Error::UnexpectedStackEnd))
@@ -175,26 +142,27 @@ impl<'txin> Stack<'txin> {
     pub(super) fn evaluate_pkh<'intp>(
         &mut self,
         verify_sig: &mut Box<dyn FnMut(&KeySigPair) -> bool + 'intp>,
-        pkh: &'intp TypedHash160,
+        pkh: hash160::Hash,
+        sig_type: SigType,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         // Parse a bitcoin key from witness data slice depending on hash context
         // when we encounter a pkh(hash)
         // Depending on the tag of hash, we parse the as full key or x-only-key
         // TODO: All keys parse errors are currently captured in a single BadPubErr
         // We don't really store information about which key error.
-        fn bitcoin_key_from_slice(sl: &[u8], tag: TypedHash160) -> Option<BitcoinKey> {
-            let key: BitcoinKey = match tag {
-                TypedHash160::XonlyKey(_) => bitcoin::XOnlyPublicKey::from_slice(sl).ok()?.into(),
-                TypedHash160::FullKey(_) => bitcoin::PublicKey::from_slice(sl).ok()?.into(),
+        fn bitcoin_key_from_slice(sl: &[u8], sig_type: SigType) -> Option<BitcoinKey> {
+            let key: BitcoinKey = match sig_type {
+                SigType::Schnorr => bitcoin::key::XOnlyPublicKey::from_slice(sl).ok()?.into(),
+                SigType::Ecdsa => bitcoin::PublicKey::from_slice(sl).ok()?.into(),
             };
             Some(key)
         }
         if let Some(Element::Push(pk)) = self.pop() {
             let pk_hash = hash160::Hash::hash(pk);
-            if pk_hash != pkh.hash160() {
-                return Some(Err(Error::PkHashVerifyFail(pkh.hash160())));
+            if pk_hash != pkh {
+                return Some(Err(Error::PkHashVerifyFail(pkh)));
             }
-            match bitcoin_key_from_slice(pk, *pkh) {
+            match bitcoin_key_from_slice(pk, sig_type) {
                 Some(pk) => {
                     if let Some(sigser) = self.pop() {
                         match sigser {
@@ -208,16 +176,14 @@ impl<'txin> Stack<'txin> {
                                     Ok(key_sig) => {
                                         self.push(Element::Satisfied);
                                         Some(Ok(SatisfiedConstraint::PublicKeyHash {
-                                            keyhash: pkh.hash160(),
-                                            key_sig: key_sig,
+                                            keyhash: pkh,
+                                            key_sig,
                                         }))
                                     }
-                                    Err(e) => return Some(Err(e)),
+                                    Err(e) => Some(Err(e)),
                                 }
                             }
-                            Element::Satisfied => {
-                                return Some(Err(Error::PkEvaluationError(pk.into())))
-                            }
+                            Element::Satisfied => Some(Err(Error::PkEvaluationError(pk.into()))),
                         }
                     } else {
                         Some(Err(Error::UnexpectedStackEnd))
@@ -236,16 +202,24 @@ impl<'txin> Stack<'txin> {
     /// The reason we don't need to copy the Script semantics is that
     /// Miniscript never evaluates integers and it is safe to treat them as
     /// booleans
-    pub(super) fn evaluate_after<'intp>(
+    pub(super) fn evaluate_after(
         &mut self,
-        n: &'intp u32,
-        age: u32,
+        n: &absolute::LockTime,
+        lock_time: absolute::LockTime,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
-        if age >= *n {
+        use absolute::LockTime::*;
+
+        let is_satisfied = match (*n, lock_time) {
+            (Blocks(n), Blocks(lock_time)) => n <= lock_time,
+            (Seconds(n), Seconds(lock_time)) => n <= lock_time,
+            _ => return Some(Err(Error::AbsoluteLockTimeComparisonInvalid(*n, lock_time))),
+        };
+
+        if is_satisfied {
             self.push(Element::Satisfied);
-            Some(Ok(SatisfiedConstraint::AbsoluteTimeLock { time: *n }))
+            Some(Ok(SatisfiedConstraint::AbsoluteTimelock { n: *n }))
         } else {
-            Some(Err(Error::AbsoluteLocktimeNotMet(*n)))
+            Some(Err(Error::AbsoluteLockTimeNotMet(*n)))
         }
     }
 
@@ -255,24 +229,29 @@ impl<'txin> Stack<'txin> {
     /// The reason we don't need to copy the Script semantics is that
     /// Miniscript never evaluates integers and it is safe to treat them as
     /// booleans
-    pub(super) fn evaluate_older<'intp>(
+    pub(super) fn evaluate_older(
         &mut self,
-        n: &'intp u32,
-        height: u32,
+        n: &relative::LockTime,
+        sequence: Sequence,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
-        if height >= *n {
-            self.push(Element::Satisfied);
-            Some(Ok(SatisfiedConstraint::RelativeTimeLock { time: *n }))
+        if let Some(tx_locktime) = sequence.to_relative_lock_time() {
+            if n.is_implied_by(tx_locktime) {
+                self.push(Element::Satisfied);
+                Some(Ok(SatisfiedConstraint::RelativeTimelock { n: *n }))
+            } else {
+                Some(Err(Error::RelativeLockTimeNotMet(*n)))
+            }
         } else {
-            Some(Err(Error::RelativeLocktimeNotMet(*n)))
+            // BIP 112: if the tx locktime has the disable flag set, fail CSV.
+            Some(Err(Error::RelativeLockTimeDisabled(*n)))
         }
     }
 
     /// Helper function to evaluate a Sha256 Node.
     /// `SIZE 32 EQUALVERIFY SHA256 h EQUAL`
-    pub(super) fn evaluate_sha256<'intp>(
+    pub(super) fn evaluate_sha256(
         &mut self,
-        hash: &'intp sha256::Hash,
+        hash: &sha256::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         if let Some(Element::Push(preimage)) = self.pop() {
             if preimage.len() != 32 {
@@ -282,7 +261,7 @@ impl<'txin> Stack<'txin> {
                 self.push(Element::Satisfied);
                 Some(Ok(SatisfiedConstraint::HashLock {
                     hash: HashLockType::Sha256(*hash),
-                    preimage: preimage_from_sl(preimage),
+                    preimage: <[u8; 32]>::try_from(preimage).expect("length checked above"),
                 }))
             } else {
                 self.push(Element::Dissatisfied);
@@ -295,19 +274,19 @@ impl<'txin> Stack<'txin> {
 
     /// Helper function to evaluate a Hash256 Node.
     /// `SIZE 32 EQUALVERIFY HASH256 h EQUAL`
-    pub(super) fn evaluate_hash256<'intp>(
+    pub(super) fn evaluate_hash256(
         &mut self,
-        hash: &'intp sha256d::Hash,
+        hash: &hash256::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         if let Some(Element::Push(preimage)) = self.pop() {
             if preimage.len() != 32 {
                 return Some(Err(Error::HashPreimageLengthMismatch));
             }
-            if sha256d::Hash::hash(preimage) == *hash {
+            if hash256::Hash::hash(preimage) == *hash {
                 self.push(Element::Satisfied);
                 Some(Ok(SatisfiedConstraint::HashLock {
                     hash: HashLockType::Hash256(*hash),
-                    preimage: preimage_from_sl(preimage),
+                    preimage: <[u8; 32]>::try_from(preimage).expect("length checked above"),
                 }))
             } else {
                 self.push(Element::Dissatisfied);
@@ -320,9 +299,9 @@ impl<'txin> Stack<'txin> {
 
     /// Helper function to evaluate a Hash160 Node.
     /// `SIZE 32 EQUALVERIFY HASH160 h EQUAL`
-    pub(super) fn evaluate_hash160<'intp>(
+    pub(super) fn evaluate_hash160(
         &mut self,
-        hash: &'intp hash160::Hash,
+        hash: &hash160::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         if let Some(Element::Push(preimage)) = self.pop() {
             if preimage.len() != 32 {
@@ -332,7 +311,7 @@ impl<'txin> Stack<'txin> {
                 self.push(Element::Satisfied);
                 Some(Ok(SatisfiedConstraint::HashLock {
                     hash: HashLockType::Hash160(*hash),
-                    preimage: preimage_from_sl(preimage),
+                    preimage: <[u8; 32]>::try_from(preimage).expect("length checked above"),
                 }))
             } else {
                 self.push(Element::Dissatisfied);
@@ -345,9 +324,9 @@ impl<'txin> Stack<'txin> {
 
     /// Helper function to evaluate a RipeMd160 Node.
     /// `SIZE 32 EQUALVERIFY RIPEMD160 h EQUAL`
-    pub(super) fn evaluate_ripemd160<'intp>(
+    pub(super) fn evaluate_ripemd160(
         &mut self,
-        hash: &'intp ripemd160::Hash,
+        hash: &ripemd160::Hash,
     ) -> Option<Result<SatisfiedConstraint, Error>> {
         if let Some(Element::Push(preimage)) = self.pop() {
             if preimage.len() != 32 {
@@ -357,7 +336,7 @@ impl<'txin> Stack<'txin> {
                 self.push(Element::Satisfied);
                 Some(Ok(SatisfiedConstraint::HashLock {
                     hash: HashLockType::Ripemd160(*hash),
-                    preimage: preimage_from_sl(preimage),
+                    preimage: <[u8; 32]>::try_from(preimage).expect("length checked above"),
                 }))
             } else {
                 self.push(Element::Dissatisfied);
@@ -383,10 +362,10 @@ impl<'txin> Stack<'txin> {
             if let Element::Push(sigser) = witness_sig {
                 let key_sig = verify_sersig(verify_sig, pk, sigser);
                 match key_sig {
-                    Ok(key_sig) => return Some(Ok(SatisfiedConstraint::PublicKey { key_sig })),
+                    Ok(key_sig) => Some(Ok(SatisfiedConstraint::PublicKey { key_sig })),
                     Err(..) => {
                         self.push(witness_sig);
-                        return None;
+                        None
                     }
                 }
             } else {
@@ -395,29 +374,5 @@ impl<'txin> Stack<'txin> {
         } else {
             Some(Err(Error::UnexpectedStackEnd))
         }
-    }
-
-    /// Helper function to evaluate a txtemplate.
-    pub fn evaluate_txtemplate<'intp>(
-        &mut self,
-        given: &sha256::Hash,
-        expected: &'intp sha256::Hash,
-    ) -> Option<Result<SatisfiedConstraint, Error>> {
-        Some(if *given == *expected {
-            Ok(SatisfiedConstraint::TxTemplate { hash: *expected })
-        } else {
-            Err(Error::TxTemplateHashWrong)
-        })
-    }
-}
-
-// Helper function to compute preimage from slice
-fn preimage_from_sl(sl: &[u8]) -> [u8; 32] {
-    if sl.len() != 32 {
-        unreachable!("Internal: Preimage length checked to be 32")
-    } else {
-        let mut preimage = [0u8; 32];
-        preimage.copy_from_slice(sl);
-        preimage
     }
 }

@@ -1,18 +1,20 @@
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+extern crate miniscript;
 
-use bitcoin::hashes::hex::ToHex;
+use std::str::FromStr;
+
 use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, PublicKey as SecpPublicKey, Secp256k1, SecretKey};
-use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use bitcoin::util::sighash::{Prevouts, SighashCache};
-use bitcoin::util::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-use bitcoin::{EcdsaSig, EcdsaSighashType, OutPoint, PublicKey, SchnorrSig, SchnorrSighashType};
-use bitcoin::{Script, Transaction, TxIn, TxOut, Witness, XOnlyPublicKey};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+use bitcoin::{
+    absolute, transaction, Amount, EcdsaSighashType, OutPoint, PublicKey, ScriptBuf, Sequence,
+    TapSighashType, Transaction, TxIn, TxOut, Witness, XOnlyPublicKey,
+};
 use miniscript::ord::Inscription;
 use miniscript::psbt::{interpreter_check, PsbtExt};
 use miniscript::{Miniscript, Segwitv0, Tap};
-use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug)]
 enum SpendKind {
@@ -29,7 +31,7 @@ impl SpendKind {
         }
     }
 
-    fn script(self, expression: &str) -> Script {
+    fn script(self, expression: &str) -> ScriptBuf {
         match self {
             SpendKind::Wsh => Miniscript::<PublicKey, Segwitv0>::from_str(expression)
                 .unwrap()
@@ -61,7 +63,7 @@ fn envelope(body: &[u8]) -> String {
 
 struct Spend {
     kind: SpendKind,
-    script: Script,
+    script: ScriptBuf,
     psbt: Psbt,
 }
 
@@ -70,24 +72,21 @@ impl Spend {
         Self::from_script(kind, kind.script(expression))
     }
 
-    fn from_script(kind: SpendKind, script: Script) -> Self {
+    fn from_script(kind: SpendKind, script: ScriptBuf) -> Self {
         let tx = Transaction {
-            version: 2,
-            lock_time: 0,
-            input: vec![TxIn {
-                sequence: 16,
-                ..TxIn::default()
-            }],
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn { sequence: Sequence(16), ..TxIn::default() }],
             output: vec![TxOut {
-                value: 90_000,
-                script_pubkey: Script::new_p2pk(&public_key(9)),
+                value: Amount::from_sat(90_000),
+                script_pubkey: ScriptBuf::new_p2pk(&public_key(9)),
             }],
         };
         let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
         let spk = match kind {
             SpendKind::Wsh => {
                 psbt.inputs[0].witness_script = Some(script.clone());
-                script.to_v0_p2wsh()
+                script.to_p2wsh()
             }
             SpendKind::Taproot => {
                 let spend_info = TaprootBuilder::new()
@@ -99,19 +98,16 @@ impl Spend {
                 psbt.inputs[0]
                     .tap_scripts
                     .insert(spend_info.control_block(&leaf).unwrap(), leaf);
-                Script::new_v1_p2tr_tweaked(spend_info.output_key())
+                ScriptBuf::new_p2tr_tweaked(spend_info.output_key())
             }
         };
         let funding = Transaction {
-            version: 2,
-            lock_time: 0,
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
             input: vec![TxIn::default()],
-            output: vec![TxOut {
-                value: 100_000,
-                script_pubkey: spk,
-            }],
+            output: vec![TxOut { value: Amount::from_sat(100_000), script_pubkey: spk }],
         };
-        psbt.unsigned_tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+        psbt.unsigned_tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
         psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
         Spend { kind, script, psbt }
     }
@@ -127,7 +123,7 @@ impl Spend {
                 SpendKind::Wsh => {
                     let hash_ty = EcdsaSighashType::All;
                     let hash = cache
-                        .segwit_signature_hash(
+                        .p2wsh_signature_hash(
                             0,
                             &self.script,
                             self.psbt.inputs[0].witness_utxo.as_ref().unwrap().value,
@@ -136,19 +132,19 @@ impl Spend {
                         .unwrap();
                     self.psbt.inputs[0].partial_sigs.insert(
                         public_key(*byte),
-                        EcdsaSig {
-                            sig: secp.sign_ecdsa(
+                        bitcoin::ecdsa::Signature {
+                            signature: secp.sign_ecdsa(
                                 &Message::from_digest_slice(&hash[..]).unwrap(),
                                 &secret,
                             ),
-                            hash_ty,
+                            sighash_type: hash_ty,
                         },
                     );
                 }
                 SpendKind::Taproot => {
                     let leaf_hash = TapLeafHash::from_script(&self.script, LeafVersion::TapScript);
                     let prevouts = vec![self.psbt.inputs[0].witness_utxo.clone().unwrap()];
-                    let hash_ty = SchnorrSighashType::Default;
+                    let hash_ty = TapSighashType::Default;
                     let hash = cache
                         .taproot_script_spend_signature_hash(
                             0,
@@ -160,12 +156,12 @@ impl Spend {
                     let keypair = Keypair::from_secret_key(&secp, &secret);
                     self.psbt.inputs[0].tap_script_sigs.insert(
                         (keypair.x_only_public_key().0, leaf_hash),
-                        SchnorrSig {
-                            sig: secp.sign_schnorr_no_aux_rand(
+                        bitcoin::taproot::Signature {
+                            signature: secp.sign_schnorr_no_aux_rand(
                                 &Message::from_digest_slice(&hash[..]).unwrap(),
                                 &keypair,
                             ),
-                            hash_ty,
+                            sighash_type: hash_ty,
                         },
                     );
                 }
@@ -181,10 +177,7 @@ impl Spend {
         interpreter_check(&self.psbt, &secp).unwrap();
         let tx = self.psbt.extract(&secp).unwrap();
         let witness = tx.input[0].witness.to_vec();
-        assert_eq!(
-            witness[witness.len() - self.kind.witness_tail()],
-            self.script.as_bytes()
-        );
+        assert_eq!(witness[witness.len() - self.kind.witness_tail()], self.script.as_bytes());
         self.psbt
     }
 }
@@ -212,12 +205,16 @@ fn multiple_and_nested_inscriptions_bind_signatures_to_the_transaction() {
             for mutation in 0..6 {
                 let mut changed = finalized.clone();
                 match mutation {
-                    0 => changed.unsigned_tx.output[0].value -= 1,
+                    0 => changed.unsigned_tx.output[0].value -= Amount::ONE_SAT,
                     1 => changed.unsigned_tx.input[0].previous_output.vout += 1,
-                    2 => changed.unsigned_tx.input[0].sequence += 1,
-                    3 => changed.unsigned_tx.version += 1,
-                    4 => changed.unsigned_tx.lock_time += 1,
-                    5 => changed.inputs[0].witness_utxo.as_mut().unwrap().value -= 1,
+                    2 => changed.unsigned_tx.input[0].sequence.0 += 1,
+                    3 => changed.unsigned_tx.version.0 += 1,
+                    4 => {
+                        changed.unsigned_tx.lock_time = absolute::LockTime::from_consensus(
+                            changed.unsigned_tx.lock_time.to_consensus_u32() + 1,
+                        )
+                    }
+                    5 => changed.inputs[0].witness_utxo.as_mut().unwrap().value -= Amount::ONE_SAT,
                     _ => unreachable!(),
                 }
                 assert_finalized_rejected(&changed);
@@ -253,13 +250,14 @@ fn inscribed_branches_require_the_selected_key_and_minimal_selector() {
                 let mut changed = finalized.clone();
                 let mut changed_witness = witness.clone();
                 changed_witness[selector] = replacement.clone();
-                changed.inputs[0].final_script_witness = Some(Witness::from_vec(changed_witness));
+                changed.inputs[0].final_script_witness =
+                    Some(Witness::from_slice(&changed_witness));
                 assert_finalized_rejected(&changed);
             }
             let mut dirty = finalized.clone();
             let mut dirty_witness = witness.clone();
             dirty_witness.insert(0, vec![1]);
-            dirty.inputs[0].final_script_witness = Some(Witness::from_vec(dirty_witness));
+            dirty.inputs[0].final_script_witness = Some(Witness::from_slice(&dirty_witness));
             assert_finalized_rejected(&dirty);
         }
     }
@@ -288,7 +286,7 @@ fn inscribed_threshold_requires_two_distinct_signatures() {
             let mut missing_witness = witness.clone();
             let index = stack.iter().position(|item| !item.is_empty()).unwrap();
             missing_witness[index].clear();
-            missing.inputs[0].final_script_witness = Some(Witness::from_vec(missing_witness));
+            missing.inputs[0].final_script_witness = Some(Witness::from_slice(&missing_witness));
             assert_finalized_rejected(&missing);
         }
         for keys in &[vec![], vec![1], vec![2], vec![3]] {
@@ -319,9 +317,10 @@ fn inscriptions_preserve_cltv_and_csv_spending_boundaries() {
             for delta in &[0, 1] {
                 let mut spend = Spend::new(kind, &expression);
                 if lock == "after" {
-                    spend.psbt.unsigned_tx.lock_time = value + delta;
+                    spend.psbt.unsigned_tx.lock_time =
+                        absolute::LockTime::from_consensus(value + delta);
                 } else {
-                    spend.psbt.unsigned_tx.input[0].sequence = value + delta;
+                    spend.psbt.unsigned_tx.input[0].sequence = Sequence(value + delta);
                 }
                 spend.sign(&[1]);
                 spend.finalize();
@@ -329,27 +328,31 @@ fn inscriptions_preserve_cltv_and_csv_spending_boundaries() {
             for invalid in 0..4 {
                 let mut spend = Spend::new(kind, &expression);
                 if lock == "after" {
-                    spend.psbt.unsigned_tx.lock_time = value;
+                    spend.psbt.unsigned_tx.lock_time = absolute::LockTime::from_consensus(value);
                     match invalid {
-                        0 => spend.psbt.unsigned_tx.lock_time -= 1,
-                        1 => {
-                            spend.psbt.unsigned_tx.lock_time = if value < 500_000_000 {
-                                500_000_000
-                            } else {
-                                100
-                            }
+                        0 => {
+                            spend.psbt.unsigned_tx.lock_time =
+                                absolute::LockTime::from_consensus(value - 1)
                         }
-                        2 => spend.psbt.unsigned_tx.input[0].sequence = 0xffffffff,
+                        1 => {
+                            spend.psbt.unsigned_tx.lock_time =
+                                absolute::LockTime::from_consensus(if value < 500_000_000 {
+                                    500_000_000
+                                } else {
+                                    100
+                                })
+                        }
+                        2 => spend.psbt.unsigned_tx.input[0].sequence = Sequence::MAX,
                         3 => continue,
                         _ => unreachable!(),
                     }
                 } else {
-                    spend.psbt.unsigned_tx.input[0].sequence = value;
+                    spend.psbt.unsigned_tx.input[0].sequence = Sequence(value);
                     match invalid {
-                        0 => spend.psbt.unsigned_tx.input[0].sequence = value - 1,
-                        1 => spend.psbt.unsigned_tx.input[0].sequence = value ^ (1 << 22),
-                        2 => spend.psbt.unsigned_tx.version = 1,
-                        3 => spend.psbt.unsigned_tx.input[0].sequence |= 1 << 31,
+                        0 => spend.psbt.unsigned_tx.input[0].sequence = Sequence(value - 1),
+                        1 => spend.psbt.unsigned_tx.input[0].sequence = Sequence(value ^ (1 << 22)),
+                        2 => spend.psbt.unsigned_tx.version = transaction::Version::ONE,
+                        3 => spend.psbt.unsigned_tx.input[0].sequence.0 |= 1 << 31,
                         _ => unreachable!(),
                     }
                 }
@@ -369,7 +372,7 @@ fn inscribed_hashlocks_require_correct_preimages_and_a_signature() {
                 0 => format!("sha256({})", sha256::Hash::hash(&preimage)),
                 // Miniscript hash256 text uses script byte order, while the
                 // sha256d Hash Display implementation reverses its bytes.
-                1 => format!("hash256({})", sha256d::Hash::hash(&preimage)[..].to_hex()),
+                1 => format!("hash256({})", miniscript::hash256::Hash::hash(&preimage)),
                 2 => format!("hash160({})", hash160::Hash::hash(&preimage)),
                 3 => format!("ripemd160({})", ripemd160::Hash::hash(&preimage)),
                 _ => unreachable!(),
@@ -426,7 +429,7 @@ fn inscribed_hashlocks_require_correct_preimages_and_a_signature() {
                     let index = witness.iter().position(|item| item == &preimage).unwrap();
                     witness[index][0] ^= 1;
                     let mut invalid = finalized;
-                    invalid.inputs[0].final_script_witness = Some(Witness::from_vec(witness));
+                    invalid.inputs[0].final_script_witness = Some(Witness::from_slice(&witness));
                     assert_finalized_rejected(&invalid);
                 } else {
                     assert!(spend.psbt.finalize_mut(&Secp256k1::new()).is_err());
@@ -440,16 +443,8 @@ fn inscribed_hashlocks_require_correct_preimages_and_a_signature() {
 fn taproot_signatures_bind_the_selected_inscription_leaf_and_control_block() {
     let kind = SpendKind::Taproot;
     let expressions = [
-        format!(
-            "inscribe_pre({},pk({}))",
-            envelope(b"first leaf"),
-            kind.key(1)
-        ),
-        format!(
-            "inscribe_post({},pk({}))",
-            envelope(b"second leaf"),
-            kind.key(1)
-        ),
+        format!("inscribe_pre({},pk({}))", envelope(b"first leaf"), kind.key(1)),
+        format!("inscribe_post({},pk({}))", envelope(b"second leaf"), kind.key(1)),
     ];
     let scripts = [kind.script(&expressions[0]), kind.script(&expressions[1])];
     let secp = Secp256k1::new();
@@ -461,17 +456,17 @@ fn taproot_signatures_bind_the_selected_inscription_leaf_and_control_block() {
         .finalize(&secp, public_key(9).inner.x_only_public_key().0)
         .unwrap();
     let funding = Transaction {
-        version: 2,
-        lock_time: 0,
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
         input: vec![TxIn::default()],
         output: vec![TxOut {
-            value: 100_000,
-            script_pubkey: Script::new_v1_p2tr_tweaked(spend_info.output_key()),
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
         }],
     };
     for chosen in 0..2 {
         let mut spend = Spend::new(kind, &expressions[chosen]);
-        spend.psbt.unsigned_tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+        spend.psbt.unsigned_tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
         spend.psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
         spend.psbt.inputs[0].tap_scripts.clear();
         for script in &scripts {
@@ -511,7 +506,7 @@ fn taproot_signatures_bind_the_selected_inscription_leaf_and_control_block() {
             } else {
                 changed[2][64] ^= 1;
             }
-            invalid.inputs[0].final_script_witness = Some(Witness::from_vec(changed));
+            invalid.inputs[0].final_script_witness = Some(Witness::from_slice(&changed));
             assert_finalized_rejected(&invalid);
         }
     }
@@ -572,7 +567,7 @@ fn malleable_inscription_satisfaction_keeps_signature_and_preimage_checks() {
                 .position(|item| item == &first || item == &second)
                 .unwrap();
             witness[index][0] ^= 1;
-            finalized.inputs[0].final_script_witness = Some(Witness::from_vec(witness));
+            finalized.inputs[0].final_script_witness = Some(Witness::from_slice(&witness));
             assert_finalized_rejected(&finalized);
         }
     }

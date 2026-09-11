@@ -1,18 +1,19 @@
 //! Bounded, deterministic checks of inscription commitment preservation.
-extern crate sapio_miniscript as miniscript;
-#[cfg(feature = "use-serde")]
+#[cfg(feature = "serde")]
 extern crate serde_json;
 
-use miniscript::bitcoin::blockdata::script::Builder;
-use miniscript::bitcoin::hashes::hex::{FromHex, ToHex};
-use miniscript::bitcoin::secp256k1::Secp256k1;
-use miniscript::bitcoin::util::taproot::TaprootBuilder;
-use miniscript::bitcoin::{Script, XOnlyPublicKey};
-use miniscript::descriptor::TapTree;
-use miniscript::ord::{envelope::Envelope, Inscription};
-use miniscript::{Descriptor, DescriptorTrait, Miniscript, Tap};
 use std::str::FromStr;
 use std::sync::Arc;
+
+use miniscript::bitcoin::blockdata::script::Builder;
+use miniscript::bitcoin::hex::DisplayHex;
+use miniscript::bitcoin::secp256k1::Secp256k1;
+use miniscript::bitcoin::taproot::TaprootBuilder;
+use miniscript::bitcoin::{ScriptBuf as Script, XOnlyPublicKey};
+use miniscript::descriptor::TapTree;
+use miniscript::ord::envelope::Envelope;
+use miniscript::ord::Inscription;
+use miniscript::{Descriptor, Miniscript, Tap};
 
 const KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const INTERNAL: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
@@ -97,8 +98,7 @@ fn field_fixture(field: usize, bytes: &[u8]) -> Vec<u8> {
 
 fn assert_descriptor_commitment(ms: &Ms, script: &Script) {
     let internal = XOnlyPublicKey::from_str(INTERNAL).unwrap();
-    let descriptor =
-        Descriptor::new_tr(internal, Some(TapTree::Leaf(Arc::new(ms.clone())))).unwrap();
+    let descriptor = Descriptor::new_tr(internal, Some(TapTree::leaf(ms.clone()))).unwrap();
     // Compare against a tree built directly from the expected wire script,
     // independently of Miniscript's descriptor parser and encoder.
     let spend = TaprootBuilder::new()
@@ -106,11 +106,11 @@ fn assert_descriptor_commitment(ms: &Ms, script: &Script) {
         .unwrap()
         .finalize(&Secp256k1::new(), internal)
         .unwrap();
-    let expected = Script::new_v1_p2tr_tweaked(spend.output_key());
+    let expected = Script::new_p2tr_tweaked(spend.output_key());
     assert_eq!(descriptor.script_pubkey(), expected);
     let restored = Descriptor::<XOnlyPublicKey>::from_str(&descriptor.to_string()).unwrap();
     assert_eq!(restored.script_pubkey(), expected);
-    #[cfg(feature = "use-serde")]
+    #[cfg(feature = "serde")]
     {
         let restored: Descriptor<XOnlyPublicKey> =
             serde_json::from_str(&serde_json::to_string(&descriptor).unwrap()).unwrap();
@@ -126,7 +126,7 @@ fn assert_wrapped_commitments(envelope: &[u8]) {
         let expression = format!(
             "inscribe_{}({},pk({}))",
             if post { "post" } else { "pre" },
-            envelope.to_hex(),
+            envelope.as_hex(),
             KEY
         );
         let ms = Ms::from_str(&expression).unwrap();
@@ -135,10 +135,14 @@ fn assert_wrapped_commitments(envelope: &[u8]) {
         } else {
             envelope.to_vec()
         };
-        expected.extend_from_slice(if post { envelope } else { &key_script[..] });
+        expected.extend_from_slice(if post {
+            envelope
+        } else {
+            key_script.as_bytes()
+        });
         let expected = Script::from(expected);
         assert_eq!(ms.encode(), expected);
-        assert_eq!(Ms::parse(&expected).unwrap().encode(), expected);
+        assert_eq!(Ms::decode(&expected).unwrap().encode(), expected);
         assert_eq!(Ms::from_str(&ms.to_string()).unwrap().encode(), expected);
         assert_descriptor_commitment(&ms, &expected);
     }
@@ -160,20 +164,14 @@ fn all_fields_preserve_absence_empty_values_and_push_boundaries() {
             let mut value = Inscription::default();
             set_field(&mut value, field, Some(bytes.clone()));
             let expected = field_fixture(field, &bytes);
-            assert_eq!(
-                reveal(&value).as_bytes(),
-                expected,
-                "field={}, length={}",
-                field,
-                length
-            );
+            assert_eq!(reveal(&value).as_bytes(), expected, "field={}, length={}", field, length);
             let raw = Envelope::from_tapscript(&Script::from(expected.clone()), 3).unwrap();
             assert_eq!(raw.len(), 1);
             let parsed: Envelope<Inscription> = raw[0].clone().into();
             assert_eq!(fields(&parsed.payload), fields(&value));
             assert_eq!(parsed.payload.duplicate_field, field == 6 && length > 520);
             assert_wrapped_commitments(&expected);
-            #[cfg(feature = "use-serde")]
+            #[cfg(feature = "serde")]
             {
                 let restored: Inscription =
                     serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap();
@@ -233,20 +231,15 @@ fn truncation_at_every_byte_rejects_incomplete_envelopes() {
     for envelope in fixtures {
         for end in 0..envelope.len() {
             let bytes = &envelope[..end];
-            let text = format!("inscribe_post({},pk({}))", bytes.to_hex(), KEY);
-            assert!(
-                Ms::from_str(&text).is_err(),
-                "prefix {} of {}",
-                end,
-                envelope.len()
-            );
-            let script = Script::from_hex(&format!("20{}ac{}", KEY, bytes.to_hex())).unwrap();
+            let text = format!("inscribe_post({},pk({}))", bytes.as_hex(), KEY);
+            assert!(Ms::from_str(&text).is_err(), "prefix {} of {}", end, envelope.len());
+            let script = Script::from_hex(&format!("20{}ac{}", KEY, bytes.as_hex())).unwrap();
             if end == 0 {
                 // Removing the entire suffix leaves the original key script.
-                assert_eq!(Ms::parse(&script).unwrap().encode(), script);
+                assert_eq!(Ms::decode(&script).unwrap().encode(), script);
             } else {
                 assert!(
-                    Ms::parse_insane(&script).is_err(),
+                    Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err(),
                     "prefix {} of {}",
                     end,
                     envelope.len()
@@ -268,19 +261,24 @@ fn unknown_tags_are_discoverable_but_cannot_change_a_miniscript_commitment() {
         assert_eq!(raw.len(), 1);
         let parsed: Envelope<Inscription> = raw[0].clone().into();
         assert_eq!(parsed.payload.unrecognized_even_field, tag % 2 == 0);
-        let text = format!("inscribe_pre({},pk({}))", envelope.to_hex(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex(), KEY);
         assert!(Ms::from_str(&text).is_err(), "tag={}", tag);
-        let script = Script::from_hex(&format!("{}20{}ac", envelope.to_hex(), KEY)).unwrap();
-        assert!(Ms::parse_insane(&script).is_err(), "tag={}", tag);
+        let script = Script::from_hex(&format!("{}20{}ac", envelope.as_hex(), KEY)).unwrap();
+        assert!(
+            Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err(),
+            "tag={}",
+            tag
+        );
     }
 }
 
 fn next_permutation(values: &mut [usize]) -> bool {
-    let Some(index) = (0..values.len() - 1)
+    let index = match (0..values.len() - 1)
         .rev()
         .find(|&i| values[i] < values[i + 1])
-    else {
-        return false;
+    {
+        Some(index) => index,
+        None => return false,
     };
     let swap = (index + 1..values.len())
         .rev()
@@ -301,14 +299,9 @@ fn all_header_field_orders_preserve_or_reject_the_original_bytes() {
             envelope.extend_from_slice(&[1, TAGS[field], 1, 0x42]);
         }
         envelope.push(0x68);
-        let text = format!("inscribe_pre({},pk({}))", envelope.to_hex(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex(), KEY);
         let result = Ms::from_str(&text);
-        assert_eq!(
-            result.is_ok(),
-            order == [0, 1, 2, 3, 4, 5, 6],
-            "order={:?}",
-            order
-        );
+        assert_eq!(result.is_ok(), order == [0, 1, 2, 3, 4, 5, 6], "order={:?}", order);
         count += 1;
         if !next_permutation(&mut order) {
             break;
@@ -328,12 +321,12 @@ fn every_single_bit_mutation_is_rejected_or_preserves_exact_script_bytes() {
             mutated[index] ^= 1 << bit;
             for post in [false, true] {
                 let script = if post {
-                    format!("20{}ac{}", KEY, mutated.to_hex())
+                    format!("20{}ac{}", KEY, mutated.as_hex())
                 } else {
-                    format!("{}20{}ac", mutated.to_hex(), KEY)
+                    format!("{}20{}ac", mutated.as_hex(), KEY)
                 };
                 let script = Script::from_hex(&script).unwrap();
-                if let Ok(parsed) = Ms::parse_insane(&script) {
+                if let Ok(parsed) = Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()) {
                     assert_eq!(
                         parsed.encode(),
                         script,
@@ -369,7 +362,7 @@ fn generated_nested_combinators_preserve_all_script_commitments() {
                 text = format!(
                     "inscribe_{}({},{})",
                     if post { "post" } else { "pre" },
-                    envelope.to_hex(),
+                    envelope.as_hex(),
                     text
                 );
                 if post {
@@ -382,7 +375,7 @@ fn generated_nested_combinators_preserve_all_script_commitments() {
                 let ms = Ms::from_str(&text).unwrap();
                 let script = Script::from(expected.clone());
                 assert_eq!(ms.encode(), script);
-                assert_eq!(Ms::parse(&script).unwrap().encode(), script);
+                assert_eq!(Ms::decode(&script).unwrap().encode(), script);
                 assert_descriptor_commitment(&ms, &script);
             }
         }
@@ -392,19 +385,11 @@ fn generated_nested_combinators_preserve_all_script_commitments() {
 #[test]
 fn nested_taproot_descriptor_preserves_leaf_bytes_and_output_key() {
     let texts = [
-        format!(
-            "inscribe_pre({},pk({}))",
-            field_fixture(7, &[0x00]).to_hex(),
-            KEY
-        ),
-        format!(
-            "inscribe_post({},pk({}))",
-            field_fixture(7, &[0x81]).to_hex(),
-            INTERNAL
-        ),
+        format!("inscribe_pre({},pk({}))", field_fixture(7, &[0x00]).as_hex(), KEY),
+        format!("inscribe_post({},pk({}))", field_fixture(7, &[0x81]).as_hex(), INTERNAL),
         format!(
             "inscribe_pre({},or_i(pk({}),pk({})))",
-            field_fixture(6, &[0x63, 0x68]).to_hex(),
+            field_fixture(6, &[0x63, 0x68]).as_hex(),
             KEY,
             INTERNAL
         ),
@@ -413,13 +398,12 @@ fn nested_taproot_descriptor_preserves_leaf_bytes_and_output_key() {
         .iter()
         .map(|text| Arc::new(Ms::from_str(text).unwrap()))
         .collect();
-    let tree = TapTree::Tree(
-        Arc::new(TapTree::Leaf(leaves[0].clone())),
-        Arc::new(TapTree::Tree(
-            Arc::new(TapTree::Leaf(leaves[1].clone())),
-            Arc::new(TapTree::Leaf(leaves[2].clone())),
-        )),
-    );
+    let tree = TapTree::combine(
+        TapTree::leaf(leaves[0].clone()),
+        TapTree::combine(TapTree::leaf(leaves[1].clone()), TapTree::leaf(leaves[2].clone()))
+            .unwrap(),
+    )
+    .unwrap();
     let internal = XOnlyPublicKey::from_str(INTERNAL).unwrap();
     let descriptor = Descriptor::new_tr(internal, Some(tree)).unwrap();
     let mut builder = TaprootBuilder::new();
@@ -427,14 +411,14 @@ fn nested_taproot_descriptor_preserves_leaf_bytes_and_output_key() {
         builder = builder.add_leaf(*depth, leaf.encode()).unwrap();
     }
     let spend = builder.finalize(&Secp256k1::new(), internal).unwrap();
-    let expected = Script::new_v1_p2tr_tweaked(spend.output_key());
+    let expected = Script::new_p2tr_tweaked(spend.output_key());
     assert_eq!(descriptor.script_pubkey(), expected);
     let restored = Descriptor::<XOnlyPublicKey>::from_str(&descriptor.to_string()).unwrap();
     assert_eq!(restored.script_pubkey(), expected);
     if let Descriptor::Tr(restored) = &restored {
         let scripts: Vec<_> = restored
-            .iter_scripts()
-            .map(|(depth, script)| (depth, script.encode()))
+            .leaves()
+            .map(|leaf| (leaf.depth(), leaf.miniscript().encode()))
             .collect();
         assert_eq!(
             scripts,
@@ -447,7 +431,7 @@ fn nested_taproot_descriptor_preserves_leaf_bytes_and_output_key() {
     } else {
         panic!("changed descriptor type");
     }
-    #[cfg(feature = "use-serde")]
+    #[cfg(feature = "serde")]
     {
         let restored: Descriptor<XOnlyPublicKey> =
             serde_json::from_str(&serde_json::to_string(&descriptor).unwrap()).unwrap();
@@ -482,11 +466,12 @@ fn noncanonical_pushes_chunks_and_oversized_fields_are_rejected() {
         envelopes.push(Script::from_hex(hex).unwrap());
     }
     for envelope in envelopes {
-        let text = format!("inscribe_pre({},pk({}))", envelope.to_hex(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_bytes().as_hex(), KEY);
         assert!(Ms::from_str(&text).is_err(), "{}", text);
         let descriptor = format!("tr({},{})", INTERNAL, text);
         assert!(Descriptor::<XOnlyPublicKey>::from_str(&descriptor).is_err());
-        let script = Script::from_hex(&format!("{}20{}ac", envelope.to_hex(), KEY)).unwrap();
-        assert!(Ms::parse_insane(&script).is_err());
+        let script =
+            Script::from_hex(&format!("{}20{}ac", envelope.as_bytes().as_hex(), KEY)).unwrap();
+        assert!(Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err());
     }
 }

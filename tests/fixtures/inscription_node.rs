@@ -1,35 +1,37 @@
 //! Generate actual library-finalized reveals for the independent Core test.
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+extern crate miniscript;
 extern crate serde_json;
 
-use bitcoin::blockdata::{opcodes, script::Builder};
-use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use bitcoin::util::sighash::{Prevouts, SighashCache};
-use bitcoin::util::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-use bitcoin::{Address, Network, OutPoint, SchnorrSig, SchnorrSighashType};
-use bitcoin::{Script, Transaction, TxIn, TxOut, Witness, XOnlyPublicKey};
-use miniscript::ord::Inscription;
-use miniscript::psbt::PsbtExt;
-use miniscript::{Miniscript, Tap, Terminal};
-use serde_json::{json, Value};
 use std::io::{self, Read};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bitcoin::blockdata::opcodes;
+use bitcoin::blockdata::script::Builder;
+use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::hashes::Hash;
+use bitcoin::hex::{DisplayHex, FromHex};
+use bitcoin::psbt::Psbt;
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{LeafVersion, Signature, TapLeafHash, TaprootBuilder};
+use bitcoin::{
+    Address, Amount, Network, OutPoint, ScriptBuf, TapSighashType, Transaction, TxIn, TxOut,
+    Witness, XOnlyPublicKey,
+};
+use miniscript::ord::Inscription;
+use miniscript::psbt::PsbtExt;
+use miniscript::{Miniscript, Tap, Terminal};
+use serde_json::{json, Value};
+
 type Ms = Miniscript<XOnlyPublicKey, Tap>;
 
 fn keypair(byte: u8) -> Keypair {
-    Keypair::from_secret_key(
-        &Secp256k1::new(),
-        &SecretKey::from_slice(&[byte; 32]).unwrap(),
-    )
+    Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[byte; 32]).unwrap())
 }
 
-fn cases() -> Vec<(&'static str, Script, bool)> {
+fn cases() -> Vec<(&'static str, ScriptBuf, bool)> {
     let owner = keypair(1).x_only_public_key().0;
     let pk = Ms::from_str(&format!("pk({})", owner)).unwrap();
     let mut cases = Vec::new();
@@ -40,10 +42,8 @@ fn cases() -> Vec<(&'static str, Script, bool)> {
         ("postfix-multiple", 520, 3, true),
         ("prefix-threshold", 521, 1, false),
     ] {
-        let mut inscription = Inscription::new(
-            Some(b"application/octet-stream".to_vec()),
-            Some(vec![0x5a; size]),
-        );
+        let mut inscription =
+            Inscription::new(Some(b"application/octet-stream".to_vec()), Some(vec![0x5a; size]));
         inscription.metadata = Some(vec![0x42; size]);
         let child = if name == "prefix-threshold" {
             Ms::from_str(&format!(
@@ -74,8 +74,8 @@ fn cases() -> Vec<(&'static str, Script, bool)> {
         .push_opcode(opcodes::OP_FALSE)
         .push_opcode(opcodes::all::OP_IF)
         .push_slice(b"ord")
-        .push_slice(&[])
-        .push_slice(&[0x5a; 521])
+        .push_slice([])
+        .push_slice(bitcoin::script::PushBytesBuf::try_from(vec![0x5a; 521]).unwrap())
         .push_opcode(opcodes::all::OP_ENDIF)
         .into_script();
     cases.push(("oversized-unexecuted-push", oversized, false));
@@ -83,7 +83,7 @@ fn cases() -> Vec<(&'static str, Script, bool)> {
 }
 
 fn vector(name: String, tx: &Transaction, allowed: bool, reason: &str) -> Value {
-    json!({"name": name, "hex": serialize(tx).to_hex(), "allowed": allowed,
+    json!({"name": name, "hex": serialize(tx).to_lower_hex_string(), "allowed": allowed,
            "reject_contains": reason})
 }
 
@@ -115,30 +115,27 @@ fn main() {
     let funding: Transaction = deserialize(&Vec::from_hex(funding_hex.trim()).unwrap()).unwrap();
     let mut vectors = Vec::new();
     for ((name, script, valid), info) in cases.into_iter().zip(spend_info) {
-        let spk = Script::new_v1_p2tr_tweaked(info.output_key());
+        let spk = ScriptBuf::new_p2tr_tweaked(info.output_key());
         let (vout, prevout) = funding
             .output
             .iter()
             .enumerate()
             .find(|(_, output)| output.script_pubkey == spk)
             .unwrap();
-        assert_eq!(prevout.value, 100_000);
+        assert_eq!(prevout.value, Amount::from_sat(100_000));
         let mut tx = Transaction {
-            version: 2,
-            lock_time: 0,
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![TxIn {
-                previous_output: OutPoint::new(funding.txid(), vout as u32),
+                previous_output: OutPoint::new(funding.compute_txid(), vout as u32),
                 ..TxIn::default()
             }],
-            output: vec![TxOut {
-                value: 90_000,
-                script_pubkey: spk,
-            }],
+            output: vec![TxOut { value: Amount::from_sat(90_000), script_pubkey: spk }],
         };
         let leaf = (script.clone(), LeafVersion::TapScript);
         let leaf_hash = TapLeafHash::from_script(&script, leaf.1);
         let control = info.control_block(&leaf).unwrap();
-        let hash_ty = SchnorrSighashType::Default;
+        let hash_ty = TapSighashType::Default;
         let sighash = SighashCache::new(&tx)
             .taproot_script_spend_signature_hash(
                 0,
@@ -147,10 +144,10 @@ fn main() {
                 hash_ty,
             )
             .unwrap();
-        let message = Message::from_digest_slice(&sighash[..]).unwrap();
-        let sign = |byte| SchnorrSig {
-            sig: secp.sign_schnorr_no_aux_rand(&message, &keypair(byte)),
-            hash_ty,
+        let message = Message::from_digest(sighash.to_byte_array());
+        let sign = |byte| Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&message, &keypair(byte)),
+            sighash_type: hash_ty,
         };
         if valid {
             let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
@@ -164,11 +161,8 @@ fn main() {
             psbt.finalize_mut(&secp).unwrap();
             tx = psbt.extract(&secp).unwrap();
         } else {
-            tx.input[0].witness = Witness::from_vec(vec![
-                sign(1).to_vec(),
-                script.into_bytes(),
-                control.serialize(),
-            ]);
+            tx.input[0].witness =
+                Witness::from_slice(&[sign(1).to_vec(), script.into_bytes(), control.serialize()]);
         }
         vectors.push(vector(
             name.into(),
@@ -204,16 +198,11 @@ fn main() {
                     witness[len - 2][offset] ^= 1;
                 }
                 "control" => witness[len - 1][1] ^= 1,
-                "output" => corrupted.output[0].value -= 1,
+                "output" => corrupted.output[0].value -= Amount::ONE_SAT,
                 _ => unreachable!(),
             }
-            corrupted.input[0].witness = Witness::from_vec(witness);
-            vectors.push(vector(
-                format!("{}-changed-{}", name, mutation),
-                &corrupted,
-                false,
-                "",
-            ));
+            corrupted.input[0].witness = Witness::from_slice(&witness);
+            vectors.push(vector(format!("{}-changed-{}", name, mutation), &corrupted, false, ""));
         }
     }
     println!("{}", json!(vectors));

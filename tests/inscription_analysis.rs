@@ -1,22 +1,25 @@
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+
+use std::str::FromStr;
+use std::sync::Arc;
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::blockdata::script::Instruction;
-use bitcoin::hashes::{sha256, Hash};
+use bitcoin::hashes::Hash;
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use bitcoin::util::sighash::{Prevouts, SighashCache};
-use bitcoin::util::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-use bitcoin::{OutPoint, PublicKey, SchnorrSig, SchnorrSighashType, Script};
-use bitcoin::{Transaction, TxIn, TxOut, Witness, XOnlyPublicKey};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{LeafVersion, Signature, TapLeafHash, TaprootBuilder};
+use bitcoin::{
+    absolute, relative, Amount, OutPoint, PublicKey, ScriptBuf, Sequence, TapSighashType,
+    Transaction, TxIn, TxOut, Witness, XOnlyPublicKey,
+};
 use miniscript::interpreter::Interpreter;
 use miniscript::ord::Inscription;
-use miniscript::policy::{concrete::PolicyError, Concrete, Semantic};
+use miniscript::policy::concrete::PolicyError;
+use miniscript::policy::{Concrete, Semantic};
 use miniscript::psbt::{interpreter_check, PsbtExt};
-use miniscript::{Miniscript, Segwitv0, Tap, Terminal};
-use std::str::FromStr;
-use std::sync::Arc;
+use miniscript::{AbsLockTime, Miniscript, RelLockTime, Segwitv0, Tap, Terminal, Threshold};
 
 type Ms = Miniscript<PublicKey, Segwitv0>;
 
@@ -25,9 +28,7 @@ fn key() -> PublicKey {
         .unwrap()
 }
 
-fn pk() -> Ms {
-    Ms::from_str(&format!("pk({})", key())).unwrap()
-}
+fn pk() -> Ms { Ms::from_str(&format!("pk({})", key())).unwrap() }
 
 fn wrap(child: Ms, count: usize, postfix: bool) -> Ms {
     let inscriptions = Arc::new(vec![Inscription::default(); count]);
@@ -40,11 +41,11 @@ fn wrap(child: Ms, count: usize, postfix: bool) -> Ms {
     .unwrap()
 }
 
-fn counted_opcodes(script: &Script) -> usize {
+fn counted_opcodes(script: &bitcoin::Script) -> usize {
     script
         .instructions()
         .filter(|instruction| match instruction {
-            Ok(Instruction::Op(opcode)) => opcode.into_u8() > opcodes::all::OP_PUSHNUM_16.into_u8(),
+            Ok(Instruction::Op(opcode)) => opcode.to_u8() > opcodes::all::OP_PUSHNUM_16.to_u8(),
             _ => false,
         })
         .count()
@@ -57,8 +58,13 @@ fn inscription_opcode_accounting_matches_the_legacy_consensus_limit() {
             let ms = wrap(pk(), *count, postfix);
             let expected = 2 * count + 1;
             assert_eq!(counted_opcodes(&ms.encode()), expected);
-            assert_eq!(ms.ext.ops_count_static, expected);
-            assert_eq!(ms.ext.ops_count_sat, Some(expected));
+            assert_eq!(ms.ext.static_ops, expected);
+            assert_eq!(
+                ms.ext
+                    .sat_data
+                    .map(|data| ms.ext.static_ops + data.max_exec_op_count),
+                Some(expected)
+            );
             assert_eq!(ms.within_resource_limits(), *count == 100);
         }
     }
@@ -73,7 +79,10 @@ fn postfix_verify_accounts_for_the_opcode_after_endif() {
         assert_eq!(verified.script_size(), verified.encode().len());
         assert_eq!(verified.ext.pk_cost, verified.encode().len());
         assert_eq!(
-            verified.ext.ops_count_sat,
+            verified
+                .ext
+                .sat_data
+                .map(|data| verified.ext.static_ops + data.max_exec_op_count),
             Some(counted_opcodes(&verified.encode()))
         );
     }
@@ -82,13 +91,23 @@ fn postfix_verify_accounts_for_the_opcode_after_endif() {
 #[test]
 fn inscriptions_preserve_impossible_paths_and_bound_postfix_stack_growth() {
     let yes = wrap(Ms::from_ast(Terminal::True).unwrap(), 1, true);
-    assert_eq!(yes.ext.ops_count_nsat, None);
-    assert_eq!(yes.ext.exec_stack_elem_count_dissat, None);
-    assert_eq!(yes.ext.exec_stack_elem_count_sat, Some(2));
+    assert_eq!(
+        yes.ext
+            .dissat_data
+            .map(|data| yes.ext.static_ops + data.max_exec_op_count),
+        None
+    );
+    assert_eq!(yes.ext.dissat_data.map(|data| data.max_exec_stack_count), None);
+    assert_eq!(yes.ext.sat_data.map(|data| data.max_exec_stack_count), Some(2));
     let no = wrap(Ms::from_ast(Terminal::False).unwrap(), 1, true);
-    assert_eq!(no.ext.ops_count_sat, None);
-    assert_eq!(no.ext.exec_stack_elem_count_sat, None);
-    assert_eq!(no.ext.exec_stack_elem_count_dissat, Some(2));
+    assert_eq!(
+        no.ext
+            .sat_data
+            .map(|data| no.ext.static_ops + data.max_exec_op_count),
+        None
+    );
+    assert_eq!(no.ext.sat_data.map(|data| data.max_exec_stack_count), None);
+    assert_eq!(no.ext.dissat_data.map(|data| data.max_exec_stack_count), Some(2));
     for &postfix in &[false, true] {
         let inscriptions = Arc::new(vec![]);
         let child = Arc::new(pk());
@@ -117,29 +136,25 @@ fn inscription_children_remain_visible_to_key_analysis() {
 
 #[test]
 fn inscription_policies_validate_their_child_and_push_sizes() {
-    let invalid = Concrete::<PublicKey>::Inscribe(
-        Box::new(Inscription::default()),
-        Box::new(Concrete::And(vec![])),
-    );
-    assert_eq!(invalid.is_valid(), Err(PolicyError::NonBinaryArgAnd));
+    let invalid = Concrete::<PublicKey>::Inscribe(Box::default(), Arc::new(Concrete::And(vec![])));
+    #[cfg(feature = "compiler")]
+    assert!(matches!(
+        invalid.compile::<Segwitv0>(),
+        Err(miniscript::policy::compiler::CompilerError::NonBinaryArgAnd)
+    ));
+    #[cfg(not(feature = "compiler"))]
+    let _ = invalid;
     let duplicate = Concrete::Inscribe(
-        Box::new(Inscription::default()),
-        Box::new(Concrete::And(vec![
-            Concrete::Key(key()),
-            Concrete::Key(key()),
-        ])),
+        Box::default(),
+        Arc::new(Concrete::And(vec![Concrete::Key(key()).into(), Concrete::Key(key()).into()])),
     );
     assert_eq!(duplicate.keys(), vec![&key(), &key()]);
     assert_eq!(duplicate.is_valid(), Err(PolicyError::DuplicatePubKeys));
 
     let oversized = Inscription::new(Some(vec![1; 521]), None);
-    let policy = Concrete::Inscribe(Box::new(oversized.clone()), Box::new(Concrete::Key(key())));
+    let policy = Concrete::Inscribe(Box::new(oversized.clone()), Arc::new(Concrete::Key(key())));
     assert!(policy.is_valid().is_err());
-    assert!(Ms::from_ast(Terminal::InscribePre(
-        Arc::new(vec![oversized]),
-        Arc::new(pk())
-    ))
-    .is_err());
+    assert!(Ms::from_ast(Terminal::InscribePre(Arc::new(vec![oversized]), Arc::new(pk()))).is_err());
 }
 
 #[test]
@@ -147,69 +162,96 @@ fn singular_inscription_policy_parsers_preserve_the_displayed_policy() {
     let inscription = Inscription::new(Some(b"text/plain".to_vec()), Some(b"hello".to_vec()));
     let concrete = Concrete::<String>::Inscribe(
         Box::new(inscription.clone()),
-        Box::new(Concrete::Key("alice".into())),
+        Arc::new(Concrete::Key("alice".into())),
     );
-    assert_eq!(
-        Concrete::<String>::from_str(&concrete.to_string()).unwrap(),
-        concrete
-    );
+    assert_eq!(Concrete::<String>::from_str(&concrete.to_string()).unwrap(), concrete);
     let semantic = Semantic::<String>::Inscribe(
         Box::new(inscription.clone()),
-        Box::new(Semantic::KeyHash("alice".into())),
+        Arc::new(Semantic::Key("alice".into())),
     );
-    assert_eq!(
-        Semantic::<String>::from_str(&semantic.to_string()).unwrap(),
-        semantic
-    );
+    assert_eq!(Semantic::<String>::from_str(&semantic.to_string()).unwrap(), semantic);
     for encoded in &[
         String::new(),
         format!("{}{}", inscription, inscription),
         format!("{}51", inscription),
     ] {
         assert!(Concrete::<String>::from_str(&format!("inscribe({},pk(alice))", encoded)).is_err());
-        assert!(
-            Semantic::<String>::from_str(&format!("inscribe({},pkh(alice))", encoded)).is_err()
-        );
+        assert!(Semantic::<String>::from_str(&format!("inscribe({},pk(alice))", encoded)).is_err());
     }
 }
 
 #[test]
 fn inscription_semantics_recurse_without_discarding_reachable_metadata() {
     let inscription = Box::new(Inscription::default());
-    let relative =
-        Semantic::<String>::Inscribe(inscription.clone(), Box::new(Semantic::Older(100)));
-    assert_eq!(relative.clone().at_age(99), Semantic::Unsatisfiable);
-    assert_eq!(relative.clone().at_age(100), relative);
-    let absolute =
-        Semantic::<String>::Inscribe(inscription.clone(), Box::new(Semantic::After(100)));
-    assert_eq!(absolute.clone().at_height(99), Semantic::Unsatisfiable);
-    assert_eq!(absolute.clone().at_height(100), absolute);
-    let child = Semantic::<String>::Threshold(
-        1,
-        vec![Semantic::Unsatisfiable, Semantic::KeyHash("a".into())],
+    let relative = Semantic::<String>::Inscribe(
+        inscription.clone(),
+        Arc::new(Semantic::Older(RelLockTime::from_consensus(100).unwrap())),
     );
     assert_eq!(
-        Semantic::Inscribe(inscription.clone(), Box::new(child)).normalized(),
-        Semantic::Inscribe(inscription.clone(), Box::new(Semantic::KeyHash("a".into())))
-    );
-    let unordered = Semantic::<String>::Threshold(
-        1,
-        vec![Semantic::KeyHash("z".into()), Semantic::KeyHash("a".into())],
+        relative.clone().at_age(relative::LockTime::from_height(99)),
+        Semantic::Unsatisfiable
     );
     assert_eq!(
-        Semantic::Inscribe(inscription.clone(), Box::new(unordered.clone())).sorted(),
-        Semantic::Inscribe(inscription, Box::new(unordered.sorted()))
+        relative
+            .clone()
+            .at_age(relative::LockTime::from_height(100)),
+        relative
+    );
+    let absolute = Semantic::<String>::Inscribe(
+        inscription.clone(),
+        Arc::new(Semantic::After(AbsLockTime::from_consensus(100).unwrap())),
+    );
+    assert_eq!(
+        absolute
+            .clone()
+            .at_lock_time(absolute::LockTime::from_consensus(99)),
+        Semantic::Unsatisfiable
+    );
+    assert_eq!(
+        absolute
+            .clone()
+            .at_lock_time(absolute::LockTime::from_consensus(100)),
+        absolute
+    );
+    let child = Semantic::<String>::Thresh(
+        Threshold::new(
+            1,
+            vec![
+                Semantic::Unsatisfiable.into(),
+                Semantic::Key("a".into()).into(),
+            ],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        Semantic::Inscribe(inscription.clone(), Arc::new(child)).normalized(),
+        Semantic::Inscribe(inscription.clone(), Arc::new(Semantic::Key("a".into())))
+    );
+    let unordered = Semantic::<String>::Thresh(
+        Threshold::new(
+            1,
+            vec![
+                Semantic::Key("z".into()).into(),
+                Semantic::Key("a".into()).into(),
+            ],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        Semantic::Inscribe(inscription.clone(), Arc::new(unordered.clone())).sorted(),
+        Semantic::Inscribe(inscription, Arc::new(unordered.sorted()))
     );
 }
 
 #[test]
 fn entailment_explicitly_rejects_unsupported_inscription_effects() {
-    let child = Semantic::<String>::KeyHash("alice".into());
-    let inscribed = Semantic::Inscribe(Box::new(Inscription::default()), Box::new(child.clone()));
-    assert!(inscribed.clone().entails(child.clone()).is_err());
-    assert!(child.clone().entails(inscribed.clone()).is_err());
-    let nested = Semantic::Threshold(1, vec![inscribed, child.clone()]);
-    assert!(nested.entails(child).is_err());
+    let child = Semantic::<String>::Key("alice".into());
+    let inscribed = Semantic::Inscribe(Box::default(), Arc::new(child.clone()));
+    assert!(inscribed.clone().entails(child.clone()).is_none());
+    assert!(child.clone().entails(inscribed.clone()).is_none());
+    let nested =
+        Semantic::Thresh(Threshold::new(1, vec![inscribed.into(), child.clone().into()]).unwrap());
+    assert!(nested.entails(child).is_none());
 }
 
 #[test]
@@ -223,16 +265,15 @@ fn interpreter_checks_the_condition_inside_an_inscription() {
             })
             .unwrap();
             let script = wrap(child, 1, postfix).encode();
-            let spk = script.to_v0_p2wsh();
-            let script_sig = Script::new();
-            let witness = Witness::from_vec(vec![script.into_bytes()]);
+            let spk = script.to_p2wsh();
+            let script_sig = ScriptBuf::new();
+            let witness = Witness::from_slice(&[script.into_bytes()]);
             let interpreter = Interpreter::from_txdata(
                 &spk,
                 &script_sig,
                 &witness,
-                0,
-                0,
-                sha256::Hash::from_inner([0; 32]),
+                Sequence::ZERO,
+                absolute::LockTime::ZERO,
             )
             .unwrap();
             let result = interpreter
@@ -269,27 +310,24 @@ fn signed_taproot_inscriptions_finalize_and_reject_invalid_signatures() {
             .finalize(&secp, public_key)
             .unwrap();
         let funding = Transaction {
-            version: 2,
-            lock_time: 0,
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![TxIn::default()],
             output: vec![TxOut {
-                value: 10_000,
-                script_pubkey: Script::new_v1_p2tr_tweaked(spend_info.output_key()),
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
             }],
         };
         let mut tx = Transaction {
-            version: 2,
-            lock_time: 0,
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![TxIn::default()],
-            output: vec![TxOut {
-                value: 9_000,
-                script_pubkey: Script::new(),
-            }],
+            output: vec![TxOut { value: Amount::from_sat(9_000), script_pubkey: ScriptBuf::new() }],
         };
-        tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+        tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
         let leaf = (script.clone(), LeafVersion::TapScript);
         let leaf_hash = TapLeafHash::from_script(&leaf.0, leaf.1);
-        let hash_ty = SchnorrSighashType::Default;
+        let hash_ty = TapSighashType::Default;
         let hash = SighashCache::new(&tx)
             .taproot_script_spend_signature_hash(
                 0,
@@ -298,12 +336,10 @@ fn signed_taproot_inscriptions_finalize_and_reject_invalid_signatures() {
                 hash_ty,
             )
             .unwrap();
-        let signature = SchnorrSig {
-            sig: secp.sign_schnorr_no_aux_rand(
-                &Message::from_digest_slice(&hash[..]).unwrap(),
-                &keypair,
-            ),
-            hash_ty,
+        let signature = Signature {
+            signature: secp
+                .sign_schnorr_no_aux_rand(&Message::from_digest(hash.to_byte_array()), &keypair),
+            sighash_type: hash_ty,
         };
         let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
         psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
@@ -316,10 +352,9 @@ fn signed_taproot_inscriptions_finalize_and_reject_invalid_signatures() {
             .insert((public_key, leaf_hash), signature);
 
         // This signature is well formed but commits to a different message.
-        let invalid_signature = SchnorrSig {
-            sig: secp
-                .sign_schnorr_no_aux_rand(&Message::from_digest_slice(&[0; 32]).unwrap(), &keypair),
-            hash_ty,
+        let invalid_signature = Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&Message::from_digest([0; 32]), &keypair),
+            sighash_type: hash_ty,
         };
         let mut invalid = psbt.clone();
         invalid.inputs[0]
@@ -336,7 +371,7 @@ fn signed_taproot_inscriptions_finalize_and_reject_invalid_signatures() {
 
         let mut corrupted = witness;
         corrupted[0] = invalid_signature.to_vec();
-        psbt.inputs[0].final_script_witness = Some(Witness::from_vec(corrupted));
+        psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&corrupted));
         assert!(interpreter_check(&psbt, &secp).is_err());
         assert!(psbt.extract(&secp).is_err());
     }

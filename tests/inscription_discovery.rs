@@ -1,7 +1,7 @@
-extern crate sapio_miniscript as miniscript;
-
-use miniscript::bitcoin::{hashes::hex::FromHex, Script};
-use miniscript::ord::{envelope::Envelope, Inscription};
+use miniscript::bitcoin::hex::FromHex;
+use miniscript::bitcoin::ScriptBuf as Script;
+use miniscript::ord::envelope::Envelope;
+use miniscript::ord::Inscription;
 
 fn discover(hex: &str) -> Vec<Envelope<Inscription>> {
     let script = Script::from(Vec::<u8>::from_hex(hex).unwrap());
@@ -31,10 +31,7 @@ fn literal_fields_distinguish_duplicates_dangling_tags_and_empty_values() {
         ),
         (
             "0063036f7264010168",
-            Inscription {
-                incomplete_field: true,
-                ..Inscription::default()
-            },
+            Inscription { incomplete_field: true, ..Inscription::default() },
         ),
         ("0063036f726401010068", Inscription::new(Some(vec![]), None)),
         ("0063036f72640068", Inscription::new(None, Some(vec![]))),
@@ -60,20 +57,14 @@ fn pushnum_diagnostics_preserve_script_number_bytes() {
     for (script, body) in &cases {
         let parsed = discover(script);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(
-            parsed[0].payload,
-            Inscription::new(None, Some(body.clone()))
-        );
+        assert_eq!(parsed[0].payload, Inscription::new(None, Some(body.clone())));
         assert!(parsed[0].pushnum, "{}", script);
         assert!(!parsed[0].stutter);
     }
 
     let tagged = discover("0063036f726451016168");
     assert_eq!(tagged.len(), 1);
-    assert_eq!(
-        tagged[0].payload,
-        Inscription::new(Some(b"a".to_vec()), None)
-    );
+    assert_eq!(tagged[0].payload, Inscription::new(Some(b"a".to_vec()), None));
     assert!(tagged[0].pushnum);
 }
 
@@ -87,10 +78,7 @@ fn stutter_requires_an_adjacent_failed_envelope_prefix() {
     for (script, stutter) in &cases {
         let parsed = discover(script);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(
-            parsed[0].payload,
-            Inscription::new(None, Some(b"a".to_vec()))
-        );
+        assert_eq!(parsed[0].payload, Inscription::new(None, Some(b"a".to_vec())));
         assert_eq!(parsed[0].stutter, *stutter, "{}", script);
         assert!(!parsed[0].pushnum);
     }
@@ -111,10 +99,7 @@ fn discovery_requires_the_protocol_prefix_and_a_complete_push_only_payload() {
     // differs from Miniscript's deliberately strict byte-preserving parser.
     let parsed = discover("00634c036f726400016168");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(
-        parsed[0].payload,
-        Inscription::new(None, Some(b"a".to_vec()))
-    );
+    assert_eq!(parsed[0].payload, Inscription::new(None, Some(b"a".to_vec())));
     assert!(!parsed[0].pushnum);
     assert!(!parsed[0].stutter);
 }

@@ -1,27 +1,14 @@
-// Miniscript
-// Written in 2019 by
-//     Sanket Kanjular and Andrew Poelstra
-//
-// To the extent possible under law, the author(s) have dedicated all
-// copyright and related and neighboring rights to this software to
-// the public domain worldwide. This software is distributed without
-// any warranty.
-//
-// You should have received a copy of the CC0 Public Domain Dedication
-// along with this software.
-// If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
-//
+// Written in 2019 by Sanket Kanjular and Andrew Poelstra
+// SPDX-License-Identifier: CC0-1.0
 
-use bitcoin;
-use bitcoin::blockdata::witness::Witness;
 use bitcoin::hashes::{hash160, sha256, Hash};
-use bitcoin::util::taproot::{ControlBlock, TAPROOT_ANNEX_PREFIX};
+use bitcoin::taproot::{ControlBlock, TAPROOT_ANNEX_PREFIX};
+use bitcoin::Witness;
 
-use {BareCtx, Legacy, Segwitv0, Tap};
-
-use super::{stack, BitcoinKey, Error, Stack, TypedHash160};
-use miniscript::context::{NoChecks, ScriptContext};
-use {Miniscript, MiniscriptKey};
+use super::{stack, BitcoinKey, Error, Stack};
+use crate::miniscript::context::{NoChecks, ScriptContext, SigType};
+use crate::prelude::*;
+use crate::{BareCtx, Legacy, Miniscript, Segwitv0, Tap, ToPublicKey, Translator};
 
 /// Attempts to parse a slice as a Bitcoin public key, checking compressedness
 /// if asked to, but otherwise dropping it
@@ -37,8 +24,8 @@ fn pk_from_slice(slice: &[u8], require_compressed: bool) -> Result<bitcoin::Publ
     }
 }
 
-fn pk_from_stackelem<'a>(
-    elem: &stack::Element<'a>,
+fn pk_from_stack_elem(
+    elem: &stack::Element<'_>,
     require_compressed: bool,
 ) -> Result<bitcoin::PublicKey, Error> {
     let slice = if let stack::Element::Push(slice) = *elem {
@@ -51,22 +38,20 @@ fn pk_from_stackelem<'a>(
 
 // Parse the script with appropriate context to check for context errors like
 // correct usage of x-only keys or multi_a
-fn script_from_stackelem<'a, Ctx: ScriptContext>(
-    elem: &stack::Element<'a>,
+fn script_from_stack_elem<Ctx: ScriptContext>(
+    elem: &stack::Element<'_>,
 ) -> Result<Miniscript<Ctx::Key, Ctx>, Error> {
     match *elem {
         stack::Element::Push(sl) => {
-            Miniscript::parse_insane(&bitcoin::Script::from(sl.to_owned())).map_err(Error::from)
+            Miniscript::decode_consensus(bitcoin::Script::from_bytes(sl)).map_err(Error::from)
         }
-        stack::Element::Satisfied => Miniscript::from_ast(::Terminal::True).map_err(Error::from),
-        stack::Element::Dissatisfied => {
-            Miniscript::from_ast(::Terminal::False).map_err(Error::from)
-        }
+        stack::Element::Satisfied => Ok(Miniscript::TRUE),
+        stack::Element::Dissatisfied => Ok(Miniscript::FALSE),
     }
 }
 
 /// Helper type to indicate the origin of the bare pubkey that the interpereter uses
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum PubkeyType {
     Pk,
     Pkh,
@@ -76,7 +61,7 @@ pub enum PubkeyType {
 }
 
 /// Helper type to indicate the origin of the bare miniscript that the interpereter uses
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum ScriptType {
     Bare,
     Sh,
@@ -86,7 +71,7 @@ pub enum ScriptType {
 }
 
 /// Structure representing a script under evaluation as a Miniscript
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub(super) enum Inner {
     /// The script being evaluated is a simple public key check (pay-to-pk,
     /// pay-to-pkhash or pay-to-witness-pkhash)
@@ -104,11 +89,12 @@ pub(super) enum Inner {
 /// Parses an `Inner` and appropriate `Stack` from completed transaction data,
 /// as well as the script that should be used as a scriptCode in a sighash
 /// Tr outputs don't have script code and return None.
+#[allow(clippy::collapsible_else_if)]
 pub(super) fn from_txdata<'txin>(
     spk: &bitcoin::Script,
     script_sig: &'txin bitcoin::Script,
     witness: &'txin Witness,
-) -> Result<(Inner, Stack<'txin>, Option<bitcoin::Script>), Error> {
+) -> Result<(Inner, Stack<'txin>, Option<bitcoin::ScriptBuf>), Error> {
     let mut ssig_stack: Stack = script_sig
         .instructions_minimal()
         .map(stack::Element::from_instruction)
@@ -127,11 +113,11 @@ pub(super) fn from_txdata<'txin>(
         } else {
             Ok((
                 Inner::PublicKey(
-                    pk_from_slice(&spk[1..spk.len() - 1], false)?.into(),
+                    pk_from_slice(spk[1..spk.len() - 1].as_bytes(), false)?.into(),
                     PubkeyType::Pk,
                 ),
                 ssig_stack,
-                Some(spk.clone()),
+                Some(spk.to_owned()),
             ))
         }
     // ** pay to pubkeyhash **
@@ -141,12 +127,14 @@ pub(super) fn from_txdata<'txin>(
         } else {
             match ssig_stack.pop() {
                 Some(elem) => {
-                    let pk = pk_from_stackelem(&elem, false)?;
-                    if *spk == bitcoin::Script::new_p2pkh(&pk.to_pubkeyhash().into()) {
+                    let pk = pk_from_stack_elem(&elem, false)?;
+                    if *spk
+                        == bitcoin::ScriptBuf::new_p2pkh(&pk.to_pubkeyhash(SigType::Ecdsa).into())
+                    {
                         Ok((
                             Inner::PublicKey(pk.into(), PubkeyType::Pkh),
                             ssig_stack,
-                            Some(spk.clone()),
+                            Some(spk.to_owned()),
                         ))
                     } else {
                         Err(Error::IncorrectPubkeyHash)
@@ -156,18 +144,19 @@ pub(super) fn from_txdata<'txin>(
             }
         }
     // ** pay to witness pubkeyhash **
-    } else if spk.is_v0_p2wpkh() {
+    } else if spk.is_p2wpkh() {
         if !ssig_stack.is_empty() {
             Err(Error::NonEmptyScriptSig)
         } else {
             match wit_stack.pop() {
                 Some(elem) => {
-                    let pk = pk_from_stackelem(&elem, true)?;
-                    if *spk == bitcoin::Script::new_v0_p2wpkh(&pk.to_pubkeyhash().into()) {
+                    let pk = pk_from_stack_elem(&elem, true)?;
+                    let hash160 = pk.to_pubkeyhash(SigType::Ecdsa);
+                    if *spk == bitcoin::ScriptBuf::new_p2wpkh(&hash160.into()) {
                         Ok((
                             Inner::PublicKey(pk.into(), PubkeyType::Wpkh),
                             wit_stack,
-                            Some(bitcoin::Script::new_p2pkh(&pk.to_pubkeyhash().into())), // bip143, why..
+                            Some(bitcoin::ScriptBuf::new_p2pkh(&hash160.into())), // bip143, why..
                         ))
                     } else {
                         Err(Error::IncorrectWPubkeyHash)
@@ -177,22 +166,18 @@ pub(super) fn from_txdata<'txin>(
             }
         }
     // ** pay to witness scripthash **
-    } else if spk.is_v0_p2wsh() {
+    } else if spk.is_p2wsh() {
         if !ssig_stack.is_empty() {
             Err(Error::NonEmptyScriptSig)
         } else {
             match wit_stack.pop() {
                 Some(elem) => {
-                    let miniscript = script_from_stackelem::<Segwitv0>(&elem)?;
+                    let miniscript = script_from_stack_elem::<Segwitv0>(&elem)?;
                     let script = miniscript.encode();
                     let miniscript = miniscript.to_no_checks_ms();
-                    let scripthash = sha256::Hash::hash(&script[..]);
-                    if *spk == bitcoin::Script::new_v0_p2wsh(&scripthash.into()) {
-                        Ok((
-                            Inner::Script(miniscript, ScriptType::Wsh),
-                            wit_stack,
-                            Some(script),
-                        ))
+                    let scripthash = sha256::Hash::hash(script.as_bytes());
+                    if *spk == bitcoin::ScriptBuf::new_p2wsh(&scripthash.into()) {
+                        Ok((Inner::Script(miniscript, ScriptType::Wsh), wit_stack, Some(script)))
                     } else {
                         Err(Error::IncorrectWScriptHash)
                     }
@@ -201,16 +186,16 @@ pub(super) fn from_txdata<'txin>(
             }
         }
     // ** pay to taproot **//
-    } else if spk.is_v1_p2tr() {
+    } else if spk.is_p2tr() {
         if !ssig_stack.is_empty() {
             Err(Error::NonEmptyScriptSig)
         } else {
-            let output_key = bitcoin::XOnlyPublicKey::from_slice(&spk[2..])
+            let output_key = bitcoin::key::XOnlyPublicKey::from_slice(spk[2..].as_bytes())
                 .map_err(|_| Error::XOnlyPublicKeyParseError)?;
             let has_annex = wit_stack
                 .last()
                 .and_then(|x| x.as_push().ok())
-                .map(|x| x.len() > 0 && x[0] == TAPROOT_ANNEX_PREFIX)
+                .map(|x| !x.is_empty() && x[0] == TAPROOT_ANNEX_PREFIX)
                 .unwrap_or(false);
             let has_annex = has_annex && (wit_stack.len() >= 2);
             if has_annex {
@@ -231,15 +216,13 @@ pub(super) fn from_txdata<'txin>(
                     let ctrl_blk = wit_stack.pop().ok_or(Error::UnexpectedStackEnd)?;
                     let ctrl_blk = ctrl_blk.as_push()?;
                     let tap_script = wit_stack.pop().ok_or(Error::UnexpectedStackEnd)?;
-                    let ctrl_blk = ControlBlock::from_slice(ctrl_blk)
-                        .map_err(|e| Error::ControlBlockParse(e))?;
-                    let tap_script = script_from_stackelem::<Tap>(&tap_script)?;
+                    let ctrl_blk =
+                        ControlBlock::decode(ctrl_blk).map_err(Error::ControlBlockParse)?;
+                    let tap_script = script_from_stack_elem::<Tap>(&tap_script)?;
                     let ms = tap_script.to_no_checks_ms();
                     // Creating new contexts is cheap
                     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
                     let tap_script = tap_script.encode();
-                    // Should not really need to call dangerous assumed tweaked here.
-                    // Should be fixed after RC
                     if ctrl_blk.verify_taproot_commitment(&secp, output_key, &tap_script) {
                         Ok((
                             Inner::Script(ms, ScriptType::Tr),
@@ -249,11 +232,11 @@ pub(super) fn from_txdata<'txin>(
                             // so it's easy enough to keep track of all uses.
                             //
                             // In particular, this return value will be put into the `script_code` member of
-                            // the `Interpreter` script; the iterpreter logic does the right thing with it.
+                            // the `Interpreter` script; the interpreter logic does the right thing with it.
                             Some(tap_script),
                         ))
                     } else {
-                        return Err(Error::ControlBlockVerificationError);
+                        Err(Error::ControlBlockVerificationError)
                     }
                 }
             }
@@ -264,7 +247,7 @@ pub(super) fn from_txdata<'txin>(
             Some(elem) => {
                 if let stack::Element::Push(slice) = elem {
                     let scripthash = hash160::Hash::hash(slice);
-                    if *spk != bitcoin::Script::new_p2sh(&scripthash.into()) {
+                    if *spk != bitcoin::ScriptBuf::new_p2sh(&scripthash.into()) {
                         return Err(Error::IncorrectScriptHash);
                     }
                     // ** p2sh-wrapped wpkh **
@@ -274,18 +257,16 @@ pub(super) fn from_txdata<'txin>(
                                 if !ssig_stack.is_empty() {
                                     Err(Error::NonEmptyScriptSig)
                                 } else {
-                                    let pk = pk_from_stackelem(&elem, true)?;
+                                    let pk = pk_from_stack_elem(&elem, true)?;
+                                    let hash160 = pk.to_pubkeyhash(SigType::Ecdsa);
                                     if slice
-                                        == &bitcoin::Script::new_v0_p2wpkh(
-                                            &pk.to_pubkeyhash().into(),
-                                        )[..]
+                                        == bitcoin::ScriptBuf::new_p2wpkh(&hash160.into())
+                                            .as_bytes()
                                     {
                                         Ok((
                                             Inner::PublicKey(pk.into(), PubkeyType::ShWpkh),
                                             wit_stack,
-                                            Some(bitcoin::Script::new_p2pkh(
-                                                &pk.to_pubkeyhash().into(),
-                                            )), // bip143, why..
+                                            Some(bitcoin::ScriptBuf::new_p2pkh(&hash160.into())), // bip143, why..
                                         ))
                                     } else {
                                         Err(Error::IncorrectWScriptHash)
@@ -302,12 +283,13 @@ pub(super) fn from_txdata<'txin>(
                                     Err(Error::NonEmptyScriptSig)
                                 } else {
                                     // parse wsh with Segwitv0 context
-                                    let miniscript = script_from_stackelem::<Segwitv0>(&elem)?;
+                                    let miniscript = script_from_stack_elem::<Segwitv0>(&elem)?;
                                     let script = miniscript.encode();
                                     let miniscript = miniscript.to_no_checks_ms();
-                                    let scripthash = sha256::Hash::hash(&script[..]);
+                                    let scripthash = sha256::Hash::hash(script.as_bytes());
                                     if slice
-                                        == &bitcoin::Script::new_v0_p2wsh(&scripthash.into())[..]
+                                        == bitcoin::ScriptBuf::new_p2wsh(&scripthash.into())
+                                            .as_bytes()
                                     {
                                         Ok((
                                             Inner::Script(miniscript, ScriptType::ShWsh),
@@ -324,17 +306,13 @@ pub(super) fn from_txdata<'txin>(
                     }
                 }
                 // normal p2sh parsed in Legacy context
-                let miniscript = script_from_stackelem::<Legacy>(&elem)?;
+                let miniscript = script_from_stack_elem::<Legacy>(&elem)?;
                 let script = miniscript.encode();
                 let miniscript = miniscript.to_no_checks_ms();
                 if wit_stack.is_empty() {
-                    let scripthash = hash160::Hash::hash(&script[..]);
-                    if *spk == bitcoin::Script::new_p2sh(&scripthash.into()) {
-                        Ok((
-                            Inner::Script(miniscript, ScriptType::Sh),
-                            ssig_stack,
-                            Some(script),
-                        ))
+                    let scripthash = hash160::Hash::hash(script.as_bytes());
+                    if *spk == bitcoin::ScriptBuf::new_p2sh(&scripthash.into()) {
+                        Ok((Inner::Script(miniscript, ScriptType::Sh), ssig_stack, Some(script)))
                     } else {
                         Err(Error::IncorrectScriptHash)
                     }
@@ -348,13 +326,9 @@ pub(super) fn from_txdata<'txin>(
     } else {
         if wit_stack.is_empty() {
             // Bare script parsed in BareCtx
-            let miniscript = Miniscript::<bitcoin::PublicKey, BareCtx>::parse_insane(spk)?;
+            let miniscript = Miniscript::<bitcoin::PublicKey, BareCtx>::decode_consensus(spk)?;
             let miniscript = miniscript.to_no_checks_ms();
-            Ok((
-                Inner::Script(miniscript, ScriptType::Bare),
-                ssig_stack,
-                Some(spk.clone()),
-            ))
+            Ok((Inner::Script(miniscript, ScriptType::Bare), ssig_stack, Some(spk.to_owned())))
         } else {
             Err(Error::NonEmptyWitness)
         }
@@ -376,47 +350,67 @@ pub(super) trait ToNoChecks {
 
 impl<Ctx: ScriptContext> ToNoChecks for Miniscript<bitcoin::PublicKey, Ctx> {
     fn to_no_checks_ms(&self) -> Miniscript<BitcoinKey, NoChecks> {
-        // specify the () error type as this cannot error
-        self.real_translate_pk::<_, _, _, (), _>(
-            &mut |pk| Ok(BitcoinKey::Fullkey(*pk)),
-            &mut |pkh| Ok(TypedHash160::FullKey(*pkh)),
-        )
-        .expect("Translation should succeed")
+        struct TranslateFullPk;
+
+        impl Translator<bitcoin::PublicKey> for TranslateFullPk {
+            type TargetPk = BitcoinKey;
+            type Error = core::convert::Infallible;
+
+            fn pk(&mut self, pk: &bitcoin::PublicKey) -> Result<BitcoinKey, Self::Error> {
+                Ok(BitcoinKey::Fullkey(*pk))
+            }
+
+            translate_hash_clone!(bitcoin::PublicKey);
+        }
+
+        self.translate_pk_ctx(&mut TranslateFullPk)
+            .expect("Translation should succeed")
     }
 }
 
-impl<Ctx: ScriptContext> ToNoChecks for Miniscript<bitcoin::XOnlyPublicKey, Ctx> {
+impl<Ctx: ScriptContext> ToNoChecks for Miniscript<bitcoin::key::XOnlyPublicKey, Ctx> {
     fn to_no_checks_ms(&self) -> Miniscript<BitcoinKey, NoChecks> {
-        // specify the () error type as this cannot error
-        self.real_translate_pk::<_, _, _, (), _>(
-            &mut |xpk| Ok(BitcoinKey::XOnlyPublicKey(*xpk)),
-            &mut |pkh| Ok(TypedHash160::XonlyKey(*pkh)),
-        )
-        .expect("Translation should succeed")
+        struct TranslateXOnlyPk;
+
+        impl Translator<bitcoin::key::XOnlyPublicKey> for TranslateXOnlyPk {
+            type TargetPk = BitcoinKey;
+            type Error = core::convert::Infallible;
+
+            fn pk(&mut self, pk: &bitcoin::key::XOnlyPublicKey) -> Result<BitcoinKey, Self::Error> {
+                Ok(BitcoinKey::XOnlyPublicKey(*pk))
+            }
+
+            translate_hash_clone!(bitcoin::key::XOnlyPublicKey);
+        }
+        self.translate_pk_ctx(&mut TranslateXOnlyPk)
+            .expect("Translation should succeed")
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::*;
+    use core::convert::TryFrom;
+    use core::str::FromStr;
+
     use bitcoin::blockdata::script;
-    use bitcoin::hashes::hex::FromHex;
-    use bitcoin::hashes::{hash160, sha256, Hash};
-    use bitcoin::{self, Script};
-    use std::str::FromStr;
+    use bitcoin::script::PushBytes;
+    use bitcoin::ScriptBuf;
+    use hex;
+
+    use super::*;
 
     struct KeyTestData {
-        pk_spk: bitcoin::Script,
-        pk_sig: bitcoin::Script,
-        pkh_spk: bitcoin::Script,
-        pkh_sig: bitcoin::Script,
-        pkh_sig_justkey: bitcoin::Script,
-        wpkh_spk: bitcoin::Script,
+        pk_spk: bitcoin::ScriptBuf,
+        pk_sig: bitcoin::ScriptBuf,
+        pkh_spk: bitcoin::ScriptBuf,
+        pkh_sig: bitcoin::ScriptBuf,
+        pkh_sig_justkey: bitcoin::ScriptBuf,
+        wpkh_spk: bitcoin::ScriptBuf,
         wpkh_stack: Witness,
         wpkh_stack_justkey: Witness,
-        sh_wpkh_spk: bitcoin::Script,
-        sh_wpkh_sig: bitcoin::Script,
+        sh_wpkh_spk: bitcoin::ScriptBuf,
+        sh_wpkh_sig: bitcoin::ScriptBuf,
         sh_wpkh_stack: Witness,
         sh_wpkh_stack_justkey: Witness,
     }
@@ -424,37 +418,38 @@ mod tests {
     impl KeyTestData {
         fn from_key(key: bitcoin::PublicKey) -> KeyTestData {
             // what a funny looking signature..
-            let dummy_sig = Vec::from_hex(
+            let dummy_sig_vec = hex::decode_to_vec(
                 "\
                 302e02153b78ce563f89a0ed9414f5aa28ad0d96d6795f9c63\
                     02153b78ce563f89a0ed9414f5aa28ad0d96d6795f9c65\
             ",
             )
             .unwrap();
+            let dummy_sig = <[u8; 48]>::try_from(&dummy_sig_vec[..]).unwrap();
 
-            let pkhash = key.to_pubkeyhash().into();
-            let wpkhash = key.to_pubkeyhash().into();
-            let wpkh_spk = bitcoin::Script::new_v0_p2wpkh(&wpkhash);
-            let wpkh_scripthash = hash160::Hash::hash(&wpkh_spk[..]).into();
+            let pkhash = key.to_pubkeyhash(SigType::Ecdsa).into();
+            let wpkhash = key.to_pubkeyhash(SigType::Ecdsa).into();
+            let wpkh_spk = bitcoin::ScriptBuf::new_p2wpkh(&wpkhash);
+            let wpkh_scripthash = hash160::Hash::hash(wpkh_spk.as_bytes()).into();
 
             KeyTestData {
-                pk_spk: bitcoin::Script::new_p2pk(&key),
-                pkh_spk: bitcoin::Script::new_p2pkh(&pkhash),
-                pk_sig: script::Builder::new().push_slice(&dummy_sig).into_script(),
+                pk_spk: bitcoin::ScriptBuf::new_p2pk(&key),
+                pkh_spk: bitcoin::ScriptBuf::new_p2pkh(&pkhash),
+                pk_sig: script::Builder::new().push_slice(dummy_sig).into_script(),
                 pkh_sig: script::Builder::new()
-                    .push_slice(&dummy_sig)
+                    .push_slice(dummy_sig)
                     .push_key(&key)
                     .into_script(),
                 pkh_sig_justkey: script::Builder::new().push_key(&key).into_script(),
                 wpkh_spk: wpkh_spk.clone(),
-                wpkh_stack: Witness::from_vec(vec![dummy_sig.clone(), key.to_bytes()]),
-                wpkh_stack_justkey: Witness::from_vec(vec![key.to_bytes()]),
-                sh_wpkh_spk: bitcoin::Script::new_p2sh(&wpkh_scripthash),
+                wpkh_stack: Witness::from_slice(&[dummy_sig_vec.clone(), key.to_bytes()]),
+                wpkh_stack_justkey: Witness::from_slice(&[key.to_bytes()]),
+                sh_wpkh_spk: bitcoin::ScriptBuf::new_p2sh(&wpkh_scripthash),
                 sh_wpkh_sig: script::Builder::new()
-                    .push_slice(&wpkh_spk[..])
+                    .push_slice(<&PushBytes>::try_from(wpkh_spk[..].as_bytes()).unwrap())
                     .into_script(),
-                sh_wpkh_stack: Witness::from_vec(vec![dummy_sig, key.to_bytes()]),
-                sh_wpkh_stack_justkey: Witness::from_vec(vec![key.to_bytes()]),
+                sh_wpkh_stack: Witness::from_slice(&[dummy_sig_vec, key.to_bytes()]),
+                sh_wpkh_stack_justkey: Witness::from_slice(&[key.to_bytes()]),
             }
         }
     }
@@ -487,65 +482,53 @@ mod tests {
         let fixed = fixed_test_data();
         let comp = KeyTestData::from_key(fixed.pk_comp);
         let uncomp = KeyTestData::from_key(fixed.pk_uncomp);
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
         let empty_wit = Witness::default();
 
         // Compressed pk, empty scriptsig
         let (inner, stack, script_code) =
             from_txdata(&comp.pk_spk, &blank_script, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pk)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pk));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(comp.pk_spk.clone()));
 
         // Uncompressed pk, empty scriptsig
         let (inner, stack, script_code) =
             from_txdata(&uncomp.pk_spk, &blank_script, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pk)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pk));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(uncomp.pk_spk.clone()));
 
         // Compressed pk, correct scriptsig
         let (inner, stack, script_code) =
             from_txdata(&comp.pk_spk, &comp.pk_sig, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pk)
-        );
-        assert_eq!(stack, Stack::from(vec![comp.pk_sig[1..].into()]));
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pk));
+        assert_eq!(stack, Stack::from(vec![comp.pk_sig[1..].as_bytes().into()]));
         assert_eq!(script_code, Some(comp.pk_spk.clone()));
 
         // Uncompressed pk, correct scriptsig
         let (inner, stack, script_code) =
             from_txdata(&uncomp.pk_spk, &uncomp.pk_sig, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pk)
-        );
-        assert_eq!(stack, Stack::from(vec![uncomp.pk_sig[1..].into()]));
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pk));
+        assert_eq!(stack, Stack::from(vec![uncomp.pk_sig[1..].as_bytes().into()]));
         assert_eq!(script_code, Some(uncomp.pk_spk));
 
         // Scriptpubkey has invalid key
         let mut spk = comp.pk_spk.to_bytes();
         spk[1] = 5;
-        let spk = bitcoin::Script::from(spk);
-        let err = from_txdata(&spk, &bitcoin::Script::new(), &empty_wit).unwrap_err();
+        let spk = bitcoin::ScriptBuf::from(spk);
+        let err = from_txdata(&spk, &bitcoin::ScriptBuf::new(), &empty_wit).unwrap_err();
         assert_eq!(err.to_string(), "could not parse pubkey");
 
         // Scriptpubkey has invalid script
         let mut spk = comp.pk_spk.to_bytes();
         spk[0] = 100;
-        let spk = bitcoin::Script::from(spk);
-        let err = from_txdata(&spk, &bitcoin::Script::new(), &empty_wit).unwrap_err();
+        let spk = bitcoin::ScriptBuf::from(spk);
+        let err = from_txdata(&spk, &bitcoin::ScriptBuf::new(), &empty_wit).unwrap_err();
         assert_eq!(&err.to_string()[0..12], "parse error:");
 
         // Witness is nonempty
-        let wit = Witness::from_vec(vec![vec![]]);
+        let wit = Witness::from_slice(&[vec![]]);
         let err = from_txdata(&comp.pk_spk, &comp.pk_sig, &wit).unwrap_err();
         assert_eq!(err.to_string(), "legacy spend had nonempty witness");
     }
@@ -558,7 +541,7 @@ mod tests {
         let empty_wit = Witness::default();
 
         // pkh, empty scriptsig; this time it errors out
-        let err = from_txdata(&comp.pkh_spk, &bitcoin::Script::new(), &empty_wit).unwrap_err();
+        let err = from_txdata(&comp.pkh_spk, &bitcoin::ScriptBuf::new(), &empty_wit).unwrap_err();
         assert_eq!(err.to_string(), "unexpected end of stack");
 
         // pkh, wrong pubkey
@@ -568,45 +551,33 @@ mod tests {
         // pkh, right pubkey, no signature
         let (inner, stack, script_code) =
             from_txdata(&comp.pkh_spk, &comp.pkh_sig_justkey, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pkh)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(comp.pkh_spk.clone()));
 
         let (inner, stack, script_code) =
             from_txdata(&uncomp.pkh_spk, &uncomp.pkh_sig_justkey, &empty_wit)
                 .expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pkh)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(uncomp.pkh_spk.clone()));
 
         // pkh, right pubkey, signature
         let (inner, stack, script_code) =
             from_txdata(&comp.pkh_spk, &comp.pkh_sig_justkey, &empty_wit).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pkh)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Pkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(comp.pkh_spk.clone()));
 
         let (inner, stack, script_code) =
             from_txdata(&uncomp.pkh_spk, &uncomp.pkh_sig_justkey, &empty_wit)
                 .expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pkh)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_uncomp.into(), PubkeyType::Pkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(uncomp.pkh_spk.clone()));
 
         // Witness is nonempty
-        let wit = Witness::from_vec(vec![vec![]]);
+        let wit = Witness::from_slice(&[vec![]]);
         let err = from_txdata(&comp.pkh_spk, &comp.pkh_sig, &wit).unwrap_err();
         assert_eq!(err.to_string(), "legacy spend had nonempty witness");
     }
@@ -616,7 +587,7 @@ mod tests {
         let fixed = fixed_test_data();
         let comp = KeyTestData::from_key(fixed.pk_comp);
         let uncomp = KeyTestData::from_key(fixed.pk_uncomp);
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
 
         // wpkh, empty witness; this time it errors out
         let err = from_txdata(&comp.wpkh_spk, &blank_script, &Witness::default()).unwrap_err();
@@ -625,41 +596,26 @@ mod tests {
         // wpkh, uncompressed pubkey
         let err =
             from_txdata(&comp.wpkh_spk, &blank_script, &uncomp.wpkh_stack_justkey).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "uncompressed pubkey in non-legacy descriptor"
-        );
+        assert_eq!(err.to_string(), "uncompressed pubkey in non-legacy descriptor");
 
         // wpkh, wrong pubkey
         let err =
             from_txdata(&uncomp.wpkh_spk, &blank_script, &comp.wpkh_stack_justkey).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "public key did not match scriptpubkey (segwit v0)"
-        );
+        assert_eq!(err.to_string(), "public key did not match scriptpubkey (segwit v0)");
 
         // wpkh, right pubkey, no signature
         let (inner, stack, script_code) =
             from_txdata(&comp.wpkh_spk, &blank_script, &comp.wpkh_stack_justkey)
                 .expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Wpkh)
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Wpkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(comp.pkh_spk.clone()));
 
         // wpkh, right pubkey, signature
         let (inner, stack, script_code) =
             from_txdata(&comp.wpkh_spk, &blank_script, &comp.wpkh_stack).expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Wpkh)
-        );
-        assert_eq!(
-            stack,
-            Stack::from(vec![comp.wpkh_stack.second_to_last().unwrap().into()])
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::Wpkh));
+        assert_eq!(stack, Stack::from(vec![comp.wpkh_stack.second_to_last().unwrap().into()]));
         assert_eq!(script_code, Some(comp.pkh_spk));
 
         // Scriptsig is nonempty
@@ -672,7 +628,7 @@ mod tests {
         let fixed = fixed_test_data();
         let comp = KeyTestData::from_key(fixed.pk_comp);
         let uncomp = KeyTestData::from_key(fixed.pk_uncomp);
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
 
         // sh_wpkh, missing witness or scriptsig
         let err = from_txdata(&comp.sh_wpkh_spk, &blank_script, &Witness::default()).unwrap_err();
@@ -684,46 +640,27 @@ mod tests {
         assert_eq!(err.to_string(), "unexpected end of stack");
 
         // sh_wpkh, uncompressed pubkey
-        let err = from_txdata(
-            &uncomp.sh_wpkh_spk,
-            &uncomp.sh_wpkh_sig,
-            &uncomp.sh_wpkh_stack_justkey,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "uncompressed pubkey in non-legacy descriptor"
-        );
+        let err =
+            from_txdata(&uncomp.sh_wpkh_spk, &uncomp.sh_wpkh_sig, &uncomp.sh_wpkh_stack_justkey)
+                .unwrap_err();
+        assert_eq!(err.to_string(), "uncompressed pubkey in non-legacy descriptor");
 
         // sh_wpkh, wrong redeem script for scriptpubkey
-        let err = from_txdata(
-            &uncomp.sh_wpkh_spk,
-            &comp.sh_wpkh_sig,
-            &comp.sh_wpkh_stack_justkey,
-        )
-        .unwrap_err();
+        let err = from_txdata(&uncomp.sh_wpkh_spk, &comp.sh_wpkh_sig, &comp.sh_wpkh_stack_justkey)
+            .unwrap_err();
         assert_eq!(err.to_string(), "redeem script did not match scriptpubkey",);
 
         // sh_wpkh, wrong redeem script for witness script
-        let err = from_txdata(
-            &uncomp.sh_wpkh_spk,
-            &uncomp.sh_wpkh_sig,
-            &comp.sh_wpkh_stack_justkey,
-        )
-        .unwrap_err();
+        let err =
+            from_txdata(&uncomp.sh_wpkh_spk, &uncomp.sh_wpkh_sig, &comp.sh_wpkh_stack_justkey)
+                .unwrap_err();
         assert_eq!(err.to_string(), "witness script did not match scriptpubkey",);
 
         // sh_wpkh, right pubkey, no signature
-        let (inner, stack, script_code) = from_txdata(
-            &comp.sh_wpkh_spk,
-            &comp.sh_wpkh_sig,
-            &comp.sh_wpkh_stack_justkey,
-        )
-        .expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::ShWpkh)
-        );
+        let (inner, stack, script_code) =
+            from_txdata(&comp.sh_wpkh_spk, &comp.sh_wpkh_sig, &comp.sh_wpkh_stack_justkey)
+                .expect("parse txdata");
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::ShWpkh));
         assert_eq!(stack, Stack::from(vec![]));
         assert_eq!(script_code, Some(comp.pkh_spk.clone()));
 
@@ -731,28 +668,23 @@ mod tests {
         let (inner, stack, script_code) =
             from_txdata(&comp.sh_wpkh_spk, &comp.sh_wpkh_sig, &comp.sh_wpkh_stack)
                 .expect("parse txdata");
-        assert_eq!(
-            inner,
-            Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::ShWpkh)
-        );
-        assert_eq!(
-            stack,
-            Stack::from(vec![comp.sh_wpkh_stack.second_to_last().unwrap().into()])
-        );
+        assert_eq!(inner, Inner::PublicKey(fixed.pk_comp.into(), PubkeyType::ShWpkh));
+        assert_eq!(stack, Stack::from(vec![comp.sh_wpkh_stack.second_to_last().unwrap().into()]));
         assert_eq!(script_code, Some(comp.pkh_spk.clone()));
     }
 
-    fn ms_inner_script(ms: &str) -> (Miniscript<BitcoinKey, NoChecks>, bitcoin::Script) {
+    fn ms_inner_script(ms: &str) -> (Miniscript<BitcoinKey, NoChecks>, bitcoin::ScriptBuf) {
         let ms = Miniscript::<bitcoin::PublicKey, Segwitv0>::from_str_insane(ms).unwrap();
         let spk = ms.encode();
         let miniscript = ms.to_no_checks_ms();
         (miniscript, spk)
     }
+
     #[test]
     fn script_bare() {
         let preimage = b"12345678----____12345678----____";
         let hash = hash160::Hash::hash(&preimage[..]);
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
         let empty_wit = Witness::default();
         let (miniscript, spk) = ms_inner_script(&format!("hash160({})", hash));
 
@@ -767,7 +699,7 @@ mod tests {
         assert_eq!(&err.to_string()[0..12], "parse error:");
 
         // nonempty witness
-        let wit = Witness::from_vec(vec![vec![]]);
+        let wit = Witness::from_slice(&[vec![]]);
         let err = from_txdata(&spk, &blank_script, &wit).unwrap_err();
         assert_eq!(&err.to_string(), "legacy spend had nonempty witness");
     }
@@ -778,13 +710,13 @@ mod tests {
         let hash = hash160::Hash::hash(&preimage[..]);
 
         let (miniscript, redeem_script) = ms_inner_script(&format!("hash160({})", hash));
-        let rs_hash = hash160::Hash::hash(&redeem_script[..]).into();
+        let rs_hash = hash160::Hash::hash(redeem_script.as_bytes()).into();
 
-        let spk = Script::new_p2sh(&rs_hash);
+        let spk = ScriptBuf::new_p2sh(&rs_hash);
         let script_sig = script::Builder::new()
-            .push_slice(&redeem_script[..])
+            .push_slice(<&PushBytes>::try_from(redeem_script.as_bytes()).unwrap())
             .into_script();
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
         let empty_wit = Witness::default();
 
         // sh without scriptsig
@@ -800,10 +732,10 @@ mod tests {
             from_txdata(&spk, &script_sig, &empty_wit).expect("parse txdata");
         assert_eq!(inner, Inner::Script(miniscript, ScriptType::Sh));
         assert_eq!(stack, Stack::from(vec![]));
-        assert_eq!(script_code, Some(redeem_script.clone()));
+        assert_eq!(script_code, Some(redeem_script));
 
         // nonempty witness
-        let wit = Witness::from_vec(vec![vec![]]);
+        let wit = Witness::from_slice(&[vec![]]);
         let err = from_txdata(&spk, &script_sig, &wit).unwrap_err();
         assert_eq!(&err.to_string(), "legacy spend had nonempty witness");
     }
@@ -813,18 +745,18 @@ mod tests {
         let preimage = b"12345678----____12345678----____";
         let hash = hash160::Hash::hash(&preimage[..]);
         let (miniscript, witness_script) = ms_inner_script(&format!("hash160({})", hash));
-        let wit_hash = sha256::Hash::hash(&witness_script[..]).into();
-        let wit_stack = Witness::from_vec(vec![witness_script.to_bytes()]);
+        let wit_hash = sha256::Hash::hash(witness_script.as_bytes()).into();
+        let wit_stack = Witness::from_slice(&[witness_script.to_bytes()]);
 
-        let spk = Script::new_v0_p2wsh(&wit_hash);
-        let blank_script = bitcoin::Script::new();
+        let spk = ScriptBuf::new_p2wsh(&wit_hash);
+        let blank_script = bitcoin::ScriptBuf::new();
 
         // wsh without witness
         let err = from_txdata(&spk, &blank_script, &Witness::default()).unwrap_err();
         assert_eq!(&err.to_string(), "unexpected end of stack");
 
         // with incorrect witness
-        let wit = Witness::from_vec(vec![spk.to_bytes()]);
+        let wit = Witness::from_slice(&[spk.to_bytes()]);
         let err = from_txdata(&spk, &blank_script, &wit).unwrap_err();
         assert_eq!(&err.to_string()[0..12], "parse error:");
 
@@ -837,7 +769,7 @@ mod tests {
 
         // nonempty script_sig
         let script_sig = script::Builder::new()
-            .push_slice(&witness_script[..])
+            .push_slice(<&PushBytes>::try_from(witness_script.as_bytes()).unwrap())
             .into_script();
         let err = from_txdata(&spk, &script_sig, &wit_stack).unwrap_err();
         assert_eq!(&err.to_string(), "segwit spend had nonempty scriptsig");
@@ -848,17 +780,17 @@ mod tests {
         let preimage = b"12345678----____12345678----____";
         let hash = hash160::Hash::hash(&preimage[..]);
         let (miniscript, witness_script) = ms_inner_script(&format!("hash160({})", hash));
-        let wit_hash = sha256::Hash::hash(&witness_script[..]).into();
-        let wit_stack = Witness::from_vec(vec![witness_script.to_bytes()]);
+        let wit_hash = sha256::Hash::hash(witness_script.as_bytes()).into();
+        let wit_stack = Witness::from_slice(&[witness_script.to_bytes()]);
 
-        let redeem_script = Script::new_v0_p2wsh(&wit_hash);
+        let redeem_script = ScriptBuf::new_p2wsh(&wit_hash);
         let script_sig = script::Builder::new()
-            .push_slice(&redeem_script[..])
+            .push_slice(<&PushBytes>::try_from(redeem_script.as_bytes()).unwrap())
             .into_script();
-        let blank_script = bitcoin::Script::new();
+        let blank_script = bitcoin::ScriptBuf::new();
 
-        let rs_hash = hash160::Hash::hash(&redeem_script[..]).into();
-        let spk = Script::new_p2sh(&rs_hash);
+        let rs_hash = hash160::Hash::hash(redeem_script.as_bytes()).into();
+        let spk = ScriptBuf::new_p2sh(&rs_hash);
 
         // shwsh without witness or scriptsig
         let err = from_txdata(&spk, &blank_script, &Witness::default()).unwrap_err();
@@ -869,7 +801,7 @@ mod tests {
         assert_eq!(&err.to_string(), "unexpected end of stack");
 
         // with incorrect witness
-        let wit = Witness::from_vec(vec![spk.to_bytes()]);
+        let wit = Witness::from_slice(&[spk.to_bytes()]);
         let err = from_txdata(&spk, &script_sig, &wit).unwrap_err();
         assert_eq!(&err.to_string()[0..12], "parse error:");
 

@@ -1,17 +1,19 @@
 extern crate bitcoin;
-extern crate sapio_miniscript as miniscript;
+extern crate miniscript;
+
+use std::convert::TryFrom;
+use std::str::FromStr;
 
 use bitcoin::blockdata::script::Builder;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256, Hash};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Message, PublicKey as SecpPublicKey, Secp256k1, SecretKey};
-use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
-use bitcoin::util::sighash::{SchnorrSighashType, SighashCache};
-use bitcoin::util::taproot::{LeafVersion, TaprootBuilder};
-use bitcoin::{EcdsaSig, EcdsaSighashType, OutPoint, PublicKey, Script, Transaction, TxIn, TxOut};
+use bitcoin::sighash::{SighashCache, TapSighashType};
+use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+use bitcoin::{EcdsaSighashType, OutPoint, PublicKey, ScriptBuf, Transaction, TxIn, TxOut};
 use miniscript::psbt::{interpreter_check, Error, InputError, PsbtExt};
 use miniscript::{Miniscript, Segwitv0};
-use std::str::FromStr;
 
 #[derive(Clone, Copy)]
 enum CtvOutput {
@@ -27,35 +29,34 @@ fn public_key() -> PublicKey {
     ))
 }
 
-fn funding_transaction(script_pubkey: Script) -> Transaction {
+fn funding_transaction(script_pubkey: ScriptBuf) -> Transaction {
     Transaction {
-        version: 2,
-        lock_time: 0,
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn::default()],
-        output: vec![TxOut {
-            value: 10_000,
-            script_pubkey,
-        }],
+        output: vec![TxOut { value: bitcoin::Amount::from_sat(10_000), script_pubkey }],
     }
 }
 
-fn legacy_signature(tx: &Transaction, index: usize, nonce: u8) -> EcdsaSig {
+fn legacy_signature(tx: &Transaction, index: usize, nonce: u8) -> bitcoin::ecdsa::Signature {
     let hash_ty = EcdsaSighashType::NonePlusAnyoneCanPay;
     let hash = SighashCache::new(tx)
-        .legacy_signature_hash(index, &Script::new_p2pk(&public_key()), hash_ty.to_u32())
+        .legacy_signature_hash(index, &ScriptBuf::new_p2pk(&public_key()), hash_ty.to_u32())
         .unwrap();
-    EcdsaSig {
-        sig: Secp256k1::new().sign_ecdsa_with_noncedata(
+    bitcoin::ecdsa::Signature {
+        signature: Secp256k1::new().sign_ecdsa_with_noncedata(
             &Message::from_digest_slice(&hash[..]).unwrap(),
             &SecretKey::from_slice(&[1; 32]).unwrap(),
             &[nonce; 32],
         ),
-        hash_ty,
+        sighash_type: hash_ty,
     }
 }
 
-fn signature_script(signature: EcdsaSig) -> Script {
-    Builder::new().push_slice(&signature.to_vec()).into_script()
+fn signature_script(signature: bitcoin::ecdsa::Signature) -> ScriptBuf {
+    Builder::new()
+        .push_slice(bitcoin::script::PushBytesBuf::try_from(signature.to_vec()).unwrap())
+        .into_script()
 }
 
 // Construct fixture commitments from the BIP-119 serialized fields, without
@@ -87,21 +88,21 @@ fn template_hash(tx: &Transaction, index: usize) -> sha256::Hash {
     sha256::Hash::hash(&fields)
 }
 
-fn mixed_psbt(ctv_index: usize, kind: CtvOutput, commit_legacy_script: bool) -> (Psbt, Script) {
+fn mixed_psbt(ctv_index: usize, kind: CtvOutput, commit_legacy_script: bool) -> (Psbt, ScriptBuf) {
     let legacy_index = 1 - ctv_index;
-    let legacy_funding = funding_transaction(Script::new_p2pk(&public_key()));
+    let legacy_funding = funding_transaction(ScriptBuf::new_p2pk(&public_key()));
     let mut tx = Transaction {
-        version: 2,
-        lock_time: 0,
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn::default(), TxIn::default()],
         output: vec![TxOut {
-            value: 19_000,
-            script_pubkey: Script::new_p2pk(&public_key()),
+            value: bitcoin::Amount::from_sat(19_000),
+            script_pubkey: ScriptBuf::new_p2pk(&public_key()),
         }],
     };
-    tx.input[legacy_index].previous_output = OutPoint::new(legacy_funding.txid(), 0);
+    tx.input[legacy_index].previous_output = OutPoint::new(legacy_funding.compute_txid(), 0);
     for input in &mut tx.input {
-        input.sequence = 0xfffffffd;
+        input.sequence = bitcoin::Sequence(0xfffffffd);
     }
 
     // NONE|ANYONECANPAY makes the exact legacy scriptSig independent of the
@@ -120,16 +121,16 @@ fn mixed_psbt(ctv_index: usize, kind: CtvOutput, commit_legacy_script: bool) -> 
     let ctv_spk = match kind {
         CtvOutput::Wsh => {
             psbt.inputs[ctv_index].witness_script = Some(script.clone());
-            script.to_v0_p2wsh()
+            script.to_p2wsh()
         }
         CtvOutput::NestedWsh => {
-            let redeem_script = script.to_v0_p2wsh();
+            let redeem_script = script.to_p2wsh();
             psbt.inputs[ctv_index].witness_script = Some(script.clone());
             psbt.inputs[ctv_index].redeem_script = Some(redeem_script.clone());
             redeem_script.to_p2sh()
         }
         CtvOutput::Taproot => {
-            psbt.inputs[ctv_index].sighash_type = Some(SchnorrSighashType::Default.into());
+            psbt.inputs[ctv_index].sighash_type = Some(TapSighashType::Default.into());
             let secp = Secp256k1::new();
             let internal_key = public_key().inner.x_only_public_key().0;
             let spend_info = TaprootBuilder::new()
@@ -142,22 +143,23 @@ fn mixed_psbt(ctv_index: usize, kind: CtvOutput, commit_legacy_script: bool) -> 
             psbt.inputs[ctv_index]
                 .tap_scripts
                 .insert(control_block, leaf);
-            Script::new_v1_p2tr_tweaked(spend_info.output_key())
+            ScriptBuf::new_p2tr_tweaked(spend_info.output_key())
         }
     };
     let ctv_funding = funding_transaction(ctv_spk);
-    psbt.unsigned_tx.input[ctv_index].previous_output = OutPoint::new(ctv_funding.txid(), 0);
+    psbt.unsigned_tx.input[ctv_index].previous_output =
+        OutPoint::new(ctv_funding.compute_txid(), 0);
     psbt.inputs[ctv_index].witness_utxo = Some(ctv_funding.output[0].clone());
     psbt.inputs[ctv_index].non_witness_utxo = Some(ctv_funding);
     psbt.inputs[legacy_index].non_witness_utxo = Some(legacy_funding);
     psbt.inputs[legacy_index]
         .partial_sigs
         .insert(public_key(), signature);
-    psbt.inputs[legacy_index].sighash_type = Some(signature.hash_ty.into());
+    psbt.inputs[legacy_index].sighash_type = Some(signature.sighash_type.into());
     (psbt, legacy_script)
 }
 
-fn set_final_legacy(psbt: &mut Psbt, index: usize, script: Script) {
+fn set_final_legacy(psbt: &mut Psbt, index: usize, script: ScriptBuf) {
     psbt.inputs[index].final_script_sig = Some(script);
     psbt.inputs[index].partial_sigs.clear();
     psbt.inputs[index].sighash_type = None;
@@ -239,10 +241,7 @@ fn later_legacy_scriptsig_invalidates_an_empty_commitment() {
         // supplies the scriptSig that the CTV branch did not commit to.
         psbt.finalize_inp_mut(&secp, 0).unwrap();
         assert!(psbt.finalize_mut(&secp).is_err());
-        assert_eq!(
-            psbt.inputs[1].final_script_sig.as_ref(),
-            Some(&legacy_script)
-        );
+        assert_eq!(psbt.inputs[1].final_script_sig.as_ref(), Some(&legacy_script));
         assert_ctv_error(interpreter_check(&psbt, &secp).unwrap_err(), 0);
         assert_ctv_error(psbt.extract(&secp).unwrap_err(), 0);
     }
@@ -269,16 +268,13 @@ fn completed_ctv_rejects_changed_outputs_and_valid_legacy_signatures() {
         psbt.finalize_mut(&secp).unwrap();
 
         let mut changed_output = psbt.clone();
-        changed_output.unsigned_tx.output[0].value -= 1;
+        changed_output.unsigned_tx.output[0].value -= bitcoin::Amount::ONE_SAT;
         assert_ctv_error(interpreter_check(&changed_output, &secp).unwrap_err(), 0);
         assert_ctv_error(changed_output.extract(&secp).unwrap_err(), 0);
 
         let mut changed_script = psbt;
         let replacement = signature_script(legacy_signature(&changed_script.unsigned_tx, 1, 1));
-        assert_ne!(
-            changed_script.inputs[1].final_script_sig.as_ref(),
-            Some(&replacement)
-        );
+        assert_ne!(changed_script.inputs[1].final_script_sig.as_ref(), Some(&replacement));
         changed_script.inputs[1].final_script_sig = Some(replacement);
         // A different valid ECDSA nonce preserves the legacy signature check;
         // only the exact-scriptSig CTV commitment forbids this replacement.
@@ -321,9 +317,7 @@ fn malformed_psbt_shapes_are_rejected_by_public_checks() {
     signed_unsigned_tx.unsigned_tx.input[0].script_sig = Builder::new().push_int(1).into_script();
     assert_public_checks_reject(signed_unsigned_tx);
     let mut witnessed_unsigned_tx = psbt;
-    witnessed_unsigned_tx.unsigned_tx.input[0]
-        .witness
-        .push(&[1]);
+    witnessed_unsigned_tx.unsigned_tx.input[0].witness.push([1]);
     assert_public_checks_reject(witnessed_unsigned_tx);
 }
 
@@ -347,9 +341,9 @@ fn single_input_malleable_finalization_allows_available_hashlock_branches() {
     ))
     .unwrap()
     .encode();
-    let funding = funding_transaction(script.to_v0_p2wsh());
-    let mut tx = funding_transaction(Script::new_p2pk(&public_key()));
-    tx.input[0].previous_output = OutPoint::new(funding.txid(), 0);
+    let funding = funding_transaction(script.to_p2wsh());
+    let mut tx = funding_transaction(ScriptBuf::new_p2pk(&public_key()));
+    tx.input[0].previous_output = OutPoint::new(funding.compute_txid(), 0);
     let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
     psbt.inputs[0].witness_utxo = Some(funding.output[0].clone());
     psbt.inputs[0].witness_script = Some(script);

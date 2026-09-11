@@ -1,0 +1,34 @@
+name: Sapio extensions
+on:
+  push:
+    branches: [master, 'codex/**']
+  pull_request:
+
+jobs:
+  extensions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test upstream and Sapio extensions together
+        run: cargo test -p miniscript --features compiler,serde --lib --tests
+      - name: Check differential fuzz regressions
+        run: cargo test -p descriptor-fuzz --locked --bin regression_compiler --bin regression_descriptor_parse
+      - name: Check extensions without the standard library
+        run: cargo check -p miniscript --locked --no-default-features --features compiler,serde --lib
+      - name: Build inscription acceptance vectors
+        run: cargo build -p miniscript --locked --example inscription_node_fixture
+      - name: Install pinned Bitcoin Core
+        run: |
+          curl --fail --location --retry 3 --max-time 120 \
+            --output "$RUNNER_TEMP/bitcoin.tar.gz" \
+            https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz
+          echo "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e  $RUNNER_TEMP/bitcoin.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/bitcoin.tar.gz" -C "$RUNNER_TEMP"
+      - name: Validate 26 inscription vectors against Bitcoin Core
+        timeout-minutes: 5
+        run: >-
+          python3 contrib/check_inscriptions.py
+          --bitcoind "$RUNNER_TEMP/bitcoin-31.1/bin/bitcoind"
+          --fixture target/debug/examples/inscription_node_fixture

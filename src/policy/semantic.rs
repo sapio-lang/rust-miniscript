@@ -44,6 +44,10 @@ pub enum Policy<Pk: MiniscriptKey> {
     Ripemd160(Pk::Ripemd160),
     /// A HASH160 whose preimage must be provided to satisfy the descriptor.
     Hash160(Pk::Hash160),
+    /// A BIP119 transaction-template commitment.
+    TxTemplate(bitcoin::hashes::sha256::Hash),
+    /// An inscription effect carried by a spending policy.
+    Inscribe(Box<crate::ord::Inscription>, Arc<Policy<Pk>>),
     /// A set of descriptors, satisfactions must be provided for `k` of them.
     Thresh(Threshold<Arc<Policy<Pk>>, 0>),
 }
@@ -118,6 +122,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 Hash256(ref h) => t.hash256(h).map(Hash256)?,
                 Ripemd160(ref h) => t.ripemd160(h).map(Ripemd160)?,
                 Hash160(ref h) => t.hash160(h).map(Hash160)?,
+                TxTemplate(h) => TxTemplate(*h),
+                Inscribe(i, _) => Inscribe(i.clone(), translated.pop().unwrap()),
                 Older(ref n) => Older(*n),
                 After(ref n) => After(*n),
                 Thresh(ref thresh) => Thresh(thresh.map_ref(|_| translated.pop().unwrap())),
@@ -142,6 +148,13 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     // This algorithm has a naive implementation. It is possible to optimize this
     // by memoizing and maintaining a hashmap.
     pub fn entails(self, other: Policy<Pk>) -> Option<bool> {
+        if self
+            .pre_order_iter()
+            .chain(other.pre_order_iter())
+            .any(|p| matches!(p, Policy::Inscribe(..)))
+        {
+            return None;
+        }
         if self.n_terminals() > ENTAILMENT_MAX_TERMINALS {
             return None;
         }
@@ -235,6 +248,8 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
             Policy::Hash256(ref h) => write!(f, "hash256({})", h),
             Policy::Ripemd160(ref h) => write!(f, "ripemd160({})", h),
             Policy::Hash160(ref h) => write!(f, "hash160({})", h),
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => write!(f, "inscribe({},{})", i, sub),
             Policy::Thresh(ref thresh) => {
                 if thresh.k() == thresh.n() {
                     thresh.debug("and", false).fmt(f)
@@ -260,6 +275,8 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
             Policy::Hash256(ref h) => write!(f, "hash256({})", h),
             Policy::Ripemd160(ref h) => write!(f, "ripemd160({})", h),
             Policy::Hash160(ref h) => write!(f, "hash160({})", h),
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => write!(f, "inscribe({},{})", i, sub),
             Policy::Thresh(ref thresh) => {
                 if thresh.k() == thresh.n() {
                     thresh.display("and", false).fmt(f)
@@ -296,6 +313,9 @@ impl<Pk: FromStrKey> expression::FromTree for Policy<Pk> {
             // in policy that have a single child that these might be confused with (we
             // require and, or and thresholds to all have >1 child).
             if let Some(parent) = node.parent() {
+                if node.is_first_child() && parent.name().rsplit('@').next() == Some("inscribe") {
+                    continue;
+                }
                 if parent.n_children() == 1 {
                     continue;
                 }
@@ -323,6 +343,32 @@ impl<Pk: FromStrKey> expression::FromTree for Policy<Pk> {
                     .map_err(Error::Parse),
                 "after" => node.verify_after().map_err(Error::Parse).map(Policy::After),
                 "older" => node.verify_older().map_err(Error::Parse).map(Policy::Older),
+                "inscribe" => {
+                    node.verify_n_children("inscribe", 2..=2)
+                        .map_err(From::from)
+                        .map_err(Error::Parse)?;
+                    let field = node.first_child().unwrap();
+                    field
+                        .verify_n_children("inscription data", 0..=0)
+                        .map_err(From::from)
+                        .map_err(Error::Parse)?;
+                    let script = bitcoin::ScriptBuf::from_hex(field.name())
+                        .map_err(|e| Error::InscriptionError(e.to_string()))?;
+                    let mut inscriptions = crate::ord::parse_inscriptions(&script)?;
+                    if inscriptions.len() != 1 {
+                        return Err(Error::InscriptionError(
+                            "expected exactly one inscription".into(),
+                        ));
+                    }
+                    Ok(Policy::Inscribe(
+                        Box::new(inscriptions.pop().unwrap()),
+                        stack.pop().unwrap(),
+                    ))
+                }
+                "txtmpl" => node
+                    .verify_terminal_parent("txtmpl", "template hash")
+                    .map(Policy::TxTemplate)
+                    .map_err(Error::Parse),
                 "sha256" => node
                     .verify_terminal_parent("sha256", "hash")
                     .map(Policy::Sha256)
@@ -390,6 +436,10 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// `Unsatisfiable`s. Does not reorder any branches; use `.sort`.
     pub fn normalized(self) -> Policy<Pk> {
         match self {
+            Policy::Inscribe(i, sub) => match sub.as_ref().clone().normalized() {
+                Policy::Unsatisfiable => Policy::Unsatisfiable,
+                child => Policy::Inscribe(i, Arc::new(child)),
+            },
             Policy::Thresh(thresh) => {
                 let mut ret_subs = Vec::with_capacity(thresh.n());
 
@@ -525,6 +575,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     }
                 }
                 Thresh(ref thresh) => Some(Thresh(thresh.map_ref(|_| at_age.pop().unwrap()))),
+                Inscribe(i, _) => Some(Inscribe(i.clone(), at_age.pop().unwrap())),
                 _ => None,
             };
             match new_policy {
@@ -555,6 +606,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     }
                 }
                 Thresh(ref thresh) => Some(Thresh(thresh.map_ref(|_| at_age.pop().unwrap()))),
+                Inscribe(i, _) => Some(Inscribe(i.clone(), at_age.pop().unwrap())),
                 _ => None,
             };
             match new_policy {
@@ -591,7 +643,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
             let minimum_n_key = match data.node {
                 Unsatisfiable => None,
                 Trivial | After(..) | Older(..) | Sha256(..) | Hash256(..) | Ripemd160(..)
-                | Hash160(..) => Some(0),
+                | Hash160(..) | TxTemplate(..) => Some(0),
+                Inscribe(_, _) => minimum_n_keys.pop().unwrap(),
                 Key(..) => Some(1),
                 Thresh(ref thresh) => {
                     let mut sublens = (0..thresh.n())
@@ -625,6 +678,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
         let mut sorted = vec![];
         for data in Arc::new(self).rtl_post_order_iter() {
             let new_policy = match data.node.as_ref() {
+                Inscribe(i, _) => Some(Inscribe(i.clone(), sorted.pop().unwrap())),
                 Thresh(ref thresh) => {
                     let mut new_thresh = thresh.map_ref(|_| sorted.pop().unwrap());
                     new_thresh.data_mut().sort();
@@ -655,7 +709,8 @@ impl<'a, Pk: MiniscriptKey> TreeLike for &'a Policy<Pk> {
 
         match *self {
             Unsatisfiable | Trivial | Key(_) | After(_) | Older(_) | Sha256(_) | Hash256(_)
-            | Ripemd160(_) | Hash160(_) => Tree::Nullary,
+            | Ripemd160(_) | Hash160(_) | TxTemplate(_) => Tree::Nullary,
+            Inscribe(_, ref sub) => Tree::Unary(sub),
             Thresh(ref thresh) => Tree::Nary(thresh.data()),
         }
     }
@@ -672,7 +727,8 @@ impl<'a, Pk: MiniscriptKey> TreeLike for &'a Arc<Policy<Pk>> {
 
         match ***self {
             Unsatisfiable | Trivial | Key(_) | After(_) | Older(_) | Sha256(_) | Hash256(_)
-            | Ripemd160(_) | Hash160(_) => Tree::Nullary,
+            | Ripemd160(_) | Hash160(_) | TxTemplate(_) => Tree::Nullary,
+            Inscribe(_, ref sub) => Tree::Unary(sub),
             Thresh(ref thresh) => Tree::Nary(thresh.data()),
         }
     }
@@ -716,8 +772,8 @@ mod tests {
     fn semantic_analysis() {
         let policy = StringPolicy::from_str("pk()").unwrap();
         assert_eq!(policy, Policy::Key("".to_owned()));
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(RelLockTime::ZERO.into()), policy);
         assert_eq!(
             policy
@@ -730,7 +786,7 @@ mod tests {
 
         let policy = StringPolicy::from_str("older(1000)").unwrap();
         assert_eq!(policy, Policy::Older(RelLockTime::from_height(1000)));
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.relative_timelocks(), vec![1000]);
         assert_eq!(policy.clone().at_age(RelLockTime::ZERO.into()), Policy::Unsatisfiable);
         assert_eq!(
@@ -756,7 +812,7 @@ mod tests {
             ))
         );
         assert_eq!(policy.relative_timelocks(), vec![1000]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.clone().at_age(RelLockTime::ZERO.into()), Policy::Key("".to_owned()));
         assert_eq!(
             policy.clone().at_age(RelLockTime::from_height(999).into()),
@@ -783,8 +839,8 @@ mod tests {
                 Policy::Unsatisfiable.into()
             ))
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), Some(1));
 
@@ -796,8 +852,8 @@ mod tests {
                 Policy::Unsatisfiable.into()
             ))
         );
-        assert_eq!(policy.relative_timelocks(), vec![]);
-        assert_eq!(policy.absolute_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
+        assert!(policy.absolute_timelocks().is_empty());
         assert_eq!(policy.n_keys(), 1);
         assert_eq!(policy.minimum_n_keys(), None);
 
@@ -861,7 +917,7 @@ mod tests {
         let policy = StringPolicy::from_str("after(1000)").unwrap();
         assert_eq!(policy, Policy::After(AbsLockTime::from_consensus(1000).unwrap()));
         assert_eq!(policy.absolute_timelocks(), vec![1000]);
-        assert_eq!(policy.relative_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
         assert_eq!(policy.clone().at_lock_time(absolute::LockTime::ZERO), Policy::Unsatisfiable);
         assert_eq!(
             policy
@@ -895,7 +951,7 @@ mod tests {
         let policy = StringPolicy::from_str("after(500000010)").unwrap();
         assert_eq!(policy, Policy::After(AbsLockTime::from_consensus(500_000_010).unwrap()));
         assert_eq!(policy.absolute_timelocks(), vec![500_000_010]);
-        assert_eq!(policy.relative_timelocks(), vec![]);
+        assert!(policy.relative_timelocks().is_empty());
         // Pass a block height to at_lock_time while policy uses a UNIX timestapm.
         assert_eq!(policy.clone().at_lock_time(absolute::LockTime::ZERO), Policy::Unsatisfiable);
         assert_eq!(

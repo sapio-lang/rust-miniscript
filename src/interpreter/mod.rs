@@ -37,6 +37,7 @@ pub struct Interpreter<'txin> {
     script_code: Option<bitcoin::ScriptBuf>,
     sequence: Sequence,
     lock_time: absolute::LockTime,
+    tx_template: Option<sha256::Hash>,
 }
 
 // A type representing functions for checking signatures that accept both
@@ -147,7 +148,17 @@ impl<'txin> Interpreter<'txin> {
         lock_time: absolute::LockTime, // CLTV, absolute lock time.
     ) -> Result<Self, Error> {
         let (inner, stack, script_code) = inner::from_txdata(spk, script_sig, witness)?;
-        Ok(Interpreter { inner, stack, script_code, sequence, lock_time })
+        Ok(Interpreter { inner, stack, script_code, sequence, lock_time, tx_template: None })
+    }
+
+    /// Supplies the BIP119 template hash of the transaction input being evaluated.
+    ///
+    /// The caller must compute this from the complete spending transaction, including
+    /// its final scriptSigs. Executed CTV fragments fail if this value is absent or
+    /// differs from their commitment; scripts without an executed CTV are unaffected.
+    pub fn with_tx_template(mut self, hash: sha256::Hash) -> Self {
+        self.tx_template = Some(hash);
+        self
     }
 
     /// Same as [`Interpreter::iter`], but allows for a custom verification function.
@@ -174,6 +185,7 @@ impl<'txin> Interpreter<'txin> {
             stack: self.stack.clone(),
             sequence: self.sequence,
             lock_time: self.lock_time,
+            tx_template: self.tx_template,
             has_errored: false,
             sig_type: self.sig_type(),
         }
@@ -462,6 +474,11 @@ pub enum HashLockType {
 /// the lifetime of witness
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum SatisfiedConstraint {
+    /// A BIP119 transaction template commitment checked against the spending input.
+    TxTemplate {
+        /// The template hash committed to by the executed CTV fragment.
+        hash: sha256::Hash,
+    },
     ///Public key and corresponding signature
     PublicKey {
         /// KeySig pair
@@ -526,6 +543,7 @@ pub struct Iter<'intp, 'txin: 'intp> {
     stack: Stack<'txin>,
     sequence: Sequence,
     lock_time: absolute::LockTime,
+    tx_template: Option<sha256::Hash>,
     has_errored: bool,
     sig_type: SigType,
 }
@@ -611,6 +629,17 @@ where
                         return res;
                     }
                 }
+                Terminal::TxTemplate(hash) => {
+                    debug_assert_eq!(node_state.n_evaluated, 0);
+                    debug_assert_eq!(node_state.n_satisfied, 0);
+                    // The encoded fragment drops its own constant after CTV; it
+                    // neither consumes witness elements nor leaves a boolean.
+                    return Some(if self.tx_template == Some(hash) {
+                        Ok(SatisfiedConstraint::TxTemplate { hash })
+                    } else {
+                        Err(Error::TxTemplateHashWrong)
+                    });
+                }
                 Terminal::After(ref n) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);
                     debug_assert_eq!(node_state.n_satisfied, 0);
@@ -661,7 +690,11 @@ where
                         return res;
                     }
                 }
-                Terminal::Alt(ref sub) | Terminal::Swap(ref sub) | Terminal::Check(ref sub) => {
+                Terminal::Alt(ref sub)
+                | Terminal::Swap(ref sub)
+                | Terminal::Check(ref sub)
+                | Terminal::InscribePre(_, ref sub)
+                | Terminal::InscribePost(_, ref sub) => {
                     debug_assert_eq!(node_state.n_evaluated, 0);
                     debug_assert_eq!(node_state.n_satisfied, 0);
                     self.push_evaluation_state(sub, 0, 0);
@@ -1056,6 +1089,7 @@ mod tests {
     use super::inner::ToNoChecks;
     use super::*;
     use crate::miniscript::analyzable::ExtParams;
+    use crate::sync::Arc;
 
     #[allow(clippy::type_complexity)]
     fn setup_keys_sigs(
@@ -1114,6 +1148,194 @@ mod tests {
         (pks, der_sigs, ecdsa_sigs, msg, secp, x_only_pks, schnorr_sigs, ser_schnorr_sigs)
     }
 
+    fn taproot_witness(
+        script: &bitcoin::ScriptBuf,
+        internal_key: bitcoin::key::XOnlyPublicKey,
+        mut stack: Vec<Vec<u8>>,
+    ) -> (bitcoin::ScriptBuf, Witness) {
+        let secp = Secp256k1::verification_only();
+        let info = taproot::TaprootBuilder::new()
+            .add_leaf(0, script.clone())
+            .unwrap()
+            .finalize(&secp, internal_key)
+            .unwrap();
+        let control = info
+            .control_block(&(script.clone(), taproot::LeafVersion::TapScript))
+            .unwrap();
+        stack.push(script.to_bytes());
+        stack.push(control.serialize());
+        (
+            bitcoin::ScriptBuf::new_p2tr_tweaked(info.output_key()),
+            Witness::from_slice(&stack),
+        )
+    }
+
+    fn ctv_key_script(
+        hash: sha256::Hash,
+        key: bitcoin::key::XOnlyPublicKey,
+    ) -> Miniscript<bitcoin::key::XOnlyPublicKey, crate::Tap> {
+        let ctv = Miniscript::from_ast(Terminal::TxTemplate(hash)).unwrap();
+        let pk = Miniscript::from_ast(Terminal::PkK(key)).unwrap();
+        let check = Miniscript::from_ast(Terminal::Check(Arc::new(pk))).unwrap();
+        Miniscript::from_ast(Terminal::AndV(Arc::new(ctv), Arc::new(check))).unwrap()
+    }
+
+    #[test]
+    fn ctv_requires_explicit_matching_commitment() {
+        let (_, _, _, message, secp, keys, signatures, serialized) = setup_keys_sigs(2);
+        let hash = sha256::Hash::hash(b"spending input template");
+        let script = ctv_key_script(hash, keys[0]).encode();
+        let (spk, witness) = taproot_witness(&script, keys[1], vec![serialized[0].clone()]);
+        let interpreter = Interpreter::from_txdata(
+            &spk,
+            bitcoin::Script::new(),
+            &witness,
+            Sequence::ZERO,
+            absolute::LockTime::ZERO,
+        )
+        .unwrap();
+        let verify = |pair: &KeySigPair| {
+            let (key, signature) = pair.as_schnorr().unwrap();
+            secp.verify_schnorr(&signature.signature, &message, &key)
+                .is_ok()
+        };
+        let mut absent = interpreter.iter_custom(Box::new(verify));
+        assert!(matches!(absent.next(), Some(Err(Error::TxTemplateHashWrong))));
+        assert!(absent.next().is_none());
+        drop(absent);
+        let interpreter = interpreter.with_tx_template(sha256::Hash::hash(b"wrong template"));
+        assert!(matches!(
+            interpreter.iter_custom(Box::new(verify)).next(),
+            Some(Err(Error::TxTemplateHashWrong))
+        ));
+        let interpreter = interpreter.with_tx_template(hash);
+        let constraints = interpreter
+            .iter_custom(Box::new(verify))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            constraints,
+            vec![
+                SatisfiedConstraint::TxTemplate { hash },
+                SatisfiedConstraint::PublicKey {
+                    key_sig: KeySigPair::Schnorr(keys[0], signatures[0])
+                },
+            ]
+        );
+
+        let (spk, wrong_signature) = taproot_witness(&script, keys[1], vec![serialized[1].clone()]);
+        let interpreter = Interpreter::from_txdata(
+            &spk,
+            bitcoin::Script::new(),
+            &wrong_signature,
+            Sequence::ZERO,
+            absolute::LockTime::ZERO,
+        )
+        .unwrap()
+        .with_tx_template(hash);
+        assert!(matches!(
+            interpreter
+                .iter_custom(Box::new(verify))
+                .collect::<Result<Vec<_>, _>>(),
+            Err(Error::InvalidSchnorrSignature(_))
+        ));
+    }
+
+    #[test]
+    fn ctv_only_checks_the_executed_branch() {
+        let (_, _, _, message, secp, keys, _, serialized) = setup_keys_sigs(2);
+        let guarded = ctv_key_script(sha256::Hash::hash(b"template"), keys[0]);
+        let pk = Miniscript::from_ast(Terminal::PkK(keys[0])).unwrap();
+        let unguarded = Miniscript::from_ast(Terminal::Check(Arc::new(pk))).unwrap();
+        let script = Miniscript::from_ast(Terminal::OrI(Arc::new(guarded), Arc::new(unguarded)))
+            .unwrap()
+            .encode();
+        for (selector, requires_commitment) in [(vec![], false), (vec![1], true)] {
+            let (spk, witness) =
+                taproot_witness(&script, keys[1], vec![serialized[0].clone(), selector]);
+            let interpreter = Interpreter::from_txdata(
+                &spk,
+                bitcoin::Script::new(),
+                &witness,
+                Sequence::ZERO,
+                absolute::LockTime::ZERO,
+            )
+            .unwrap();
+            let result = interpreter
+                .iter_custom(Box::new(|pair| {
+                    let (key, signature) = pair.as_schnorr().unwrap();
+                    secp.verify_schnorr(&signature.signature, &message, &key)
+                        .is_ok()
+                }))
+                .collect::<Result<Vec<_>, _>>();
+            if requires_commitment {
+                assert!(matches!(result, Err(Error::TxTemplateHashWrong)));
+            } else {
+                assert_eq!(result.unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn inscriptions_preserve_ctv_signature_and_cleanstack_checks() {
+        let (_, _, _, message, secp, keys, _, serialized) = setup_keys_sigs(2);
+        let hash = sha256::Hash::hash(b"template");
+        let inscriptions = Arc::new(vec![crate::ord::Inscription::new(
+            Some(b"text/plain".to_vec()),
+            Some(b"immutable envelope".to_vec()),
+        )]);
+        for before in [false, true] {
+            let inner = Arc::new(ctv_key_script(hash, keys[0]));
+            let node = if before {
+                Terminal::InscribePre(Arc::clone(&inscriptions), inner)
+            } else {
+                Terminal::InscribePost(Arc::clone(&inscriptions), inner)
+            };
+            let script = Miniscript::from_ast(node).unwrap().encode();
+            for (stack, succeeds) in [
+                (vec![serialized[0].clone()], true),
+                (vec![serialized[1].clone()], false),
+                (vec![vec![42], serialized[0].clone()], false),
+            ] {
+                let (spk, witness) = taproot_witness(&script, keys[1], stack);
+                let interpreter = Interpreter::from_txdata(
+                    &spk,
+                    bitcoin::Script::new(),
+                    &witness,
+                    Sequence::ZERO,
+                    absolute::LockTime::ZERO,
+                )
+                .unwrap()
+                .with_tx_template(hash);
+                let result = interpreter
+                    .iter_custom(Box::new(|pair| {
+                        let (key, signature) = pair.as_schnorr().unwrap();
+                        secp.verify_schnorr(&signature.signature, &message, &key)
+                            .is_ok()
+                    }))
+                    .collect::<Result<Vec<_>, _>>();
+                assert_eq!(result.is_ok(), succeeds);
+                if let Ok(constraints) = result {
+                    assert_eq!(constraints.len(), 2);
+                    assert_eq!(constraints[0], SatisfiedConstraint::TxTemplate { hash });
+                }
+            }
+            let (spk, witness) = taproot_witness(&script, keys[1], vec![serialized[0].clone()]);
+            let interpreter = Interpreter::from_txdata(
+                &spk,
+                bitcoin::Script::new(),
+                &witness,
+                Sequence::ZERO,
+                absolute::LockTime::ZERO,
+            )
+            .unwrap();
+            assert!(matches!(
+                interpreter.iter_assume_sigs().next(),
+                Some(Err(Error::TxTemplateHashWrong))
+            ));
+        }
+    }
+
     #[test]
     fn sat_constraints() {
         let (pks, der_sigs, ecdsa_sigs, sighash, secp, xpks, schnorr_sigs, ser_schnorr_sigs) =
@@ -1140,6 +1362,7 @@ mod tests {
                 state: vec![NodeEvaluationState { node: ms, n_evaluated: 0, n_satisfied: 0 }],
                 sequence: Sequence::from_height(1002),
                 lock_time: absolute::LockTime::from_height(1002).unwrap(),
+                tx_template: None,
                 has_errored: false,
                 sig_type: SigType::Ecdsa,
             }

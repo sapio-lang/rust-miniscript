@@ -454,8 +454,14 @@ impl CompilerExtData {
             Terminal::Older(_) => Self::time(),
             Terminal::Sha256(..) => Self::hash(),
             Terminal::Hash256(..) => Self::hash(),
+            Terminal::TxTemplate(..) => {
+                Self { branch_prob: None, sat_cost: 0.0, dissat_cost: None }
+            }
             Terminal::Ripemd160(..) => Self::hash(),
             Terminal::Hash160(..) => Self::hash(),
+            Terminal::InscribePre(_, ref sub) | Terminal::InscribePost(_, ref sub) => {
+                get_child(&sub.node, 0)
+            }
             Terminal::Alt(ref sub) => Self::cast_alt(get_child(&sub.node, 0)),
             Terminal::Swap(ref sub) => Self::cast_swap(get_child(&sub.node, 0)),
             Terminal::Check(ref sub) => Self::cast_check(get_child(&sub.node, 0)),
@@ -825,6 +831,18 @@ where
     }
 
     match *policy {
+        Concrete::Inscribe(ref inscription, ref sub) => {
+            for (_, child) in best_compilations(policy_cache, sub, sat_prob, dissat_prob)? {
+                let ast =
+                    Terminal::InscribePre(Arc::new(vec![inscription.as_ref().clone()]), child.ms);
+                if let Ok(ms) = Miniscript::from_ast(ast) {
+                    insert_wrap!(AstElemExt {
+                        ms: Arc::new(ms),
+                        comp_ext_data: child.comp_ext_data
+                    });
+                }
+            }
+        }
         Concrete::Unsatisfiable => {
             insert_wrap!(AstElemExt::terminal(Miniscript::FALSE));
         }
@@ -835,6 +853,9 @@ where
             insert_wrap!(AstElemExt::terminal(Miniscript::pk_h(pk.clone())));
             insert_wrap!(AstElemExt::terminal(Miniscript::pk_k(pk.clone())));
         }
+        Concrete::TxTemplate(h) => insert_wrap!(AstElemExt::terminal(
+            Miniscript::from_ast(Terminal::TxTemplate(h)).expect("valid CTV type")
+        )),
         Concrete::After(n) => insert_wrap!(AstElemExt::terminal(Miniscript::after(n))),
         Concrete::Older(n) => insert_wrap!(AstElemExt::terminal(Miniscript::older(n))),
         Concrete::Sha256(ref hash) => {

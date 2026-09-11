@@ -96,6 +96,8 @@ pub enum Error {
     SchnorrSig(bitcoin::taproot::SigFromSliceError),
     /// Errors in signature hash calculations
     SighashError(bitcoin::sighash::InvalidSighashTypeError),
+    /// The spending input template hash is missing or differs from the CTV commitment.
+    TxTemplateHashWrong,
     /// Taproot Annex Unsupported
     TapAnnexUnsupported,
     /// An uncompressed public key was encountered in a context where it is
@@ -171,6 +173,9 @@ impl fmt::Display for Error {
             Error::Secp(ref e) => fmt::Display::fmt(e, f),
             Error::SchnorrSig(ref s) => write!(f, "Schnorr sig error: {}", s),
             Error::SighashError(ref e) => fmt::Display::fmt(e, f),
+            Error::TxTemplateHashWrong => {
+                f.write_str("transaction template hash missing or mismatched")
+            }
             Error::TapAnnexUnsupported => f.write_str("Encountered annex element"),
             Error::UncompressedPubkey => {
                 f.write_str("uncompressed pubkey in non-legacy descriptor")
@@ -220,6 +225,7 @@ impl error::Error for Error {
             | RelativeLockTimeNotMet(_)
             | RelativeLockTimeDisabled(_)
             | ScriptSatisfactionError
+            | TxTemplateHashWrong
             | TapAnnexUnsupported
             | UncompressedPubkey
             | UnexpectedStackBoolean

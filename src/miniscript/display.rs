@@ -24,6 +24,8 @@ enum DisplayNode<'a, Pk: MiniscriptKey, Ctx: ScriptContext> {
     Hash256(&'a Pk::Hash256),
     Ripemd160(&'a Pk::Ripemd160),
     Hash160(&'a Pk::Hash160),
+    TxTemplate(&'a bitcoin::hashes::sha256::Hash),
+    Inscriptions(&'a [crate::ord::Inscription]),
 }
 
 #[derive(Clone)]
@@ -61,6 +63,12 @@ impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> TreeLike for DisplayNode<'a, Pk,
     fn as_node(&self) -> Tree<Self, Self::NaryChildren> {
         match self {
             DisplayNode::Node(_, ref node) => match node {
+                Terminal::InscribePre(ref i, ref sub) | Terminal::InscribePost(ref i, ref sub) => {
+                    Tree::Binary(
+                        DisplayNode::Inscriptions(i),
+                        DisplayNode::Node(sub.ty, sub.as_inner()),
+                    )
+                }
                 Terminal::True | Terminal::False => Tree::Nullary,
                 Terminal::PkK(ref pk) | Terminal::PkH(ref pk) => Tree::Unary(DisplayNode::Key(pk)),
                 Terminal::RawPkH(ref pkh) => Tree::Unary(DisplayNode::RawKeyHash(pkh)),
@@ -70,6 +78,7 @@ impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> TreeLike for DisplayNode<'a, Pk,
                 Terminal::Hash256(ref h) => Tree::Unary(DisplayNode::Hash256(h)),
                 Terminal::Ripemd160(ref h) => Tree::Unary(DisplayNode::Ripemd160(h)),
                 Terminal::Hash160(ref h) => Tree::Unary(DisplayNode::Hash160(h)),
+                Terminal::TxTemplate(ref h) => Tree::Unary(DisplayNode::TxTemplate(h)),
                 // Check hash to be treated specially as always..
                 Terminal::Check(ref sub) => match sub.as_inner() {
                     Terminal::PkK(ref pk) | Terminal::PkH(ref pk) => {
@@ -211,6 +220,16 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                 (DisplayTypes::None, DisplayNode::Hash256(ref h)) => fmt::Display::fmt(h, f)?,
                 (DisplayTypes::None, DisplayNode::Ripemd160(ref h)) => fmt::Display::fmt(h, f)?,
                 (DisplayTypes::None, DisplayNode::Hash160(ref h)) => fmt::Display::fmt(h, f)?,
+                (_, DisplayNode::Inscriptions(i)) => {
+                    let script = i
+                        .iter()
+                        .fold(bitcoin::script::Builder::new(), |b, i| {
+                            i.append_reveal_script_to_builder(b)
+                        })
+                        .into_script();
+                    write!(f, "{:x}", script)?;
+                }
+                (_, DisplayNode::TxTemplate(ref h)) => fmt::Display::fmt(h, f)?,
                 (_, DisplayNode::ThresholdK(ref k)) => fmt::Debug::fmt(k, f)?,
                 (_, DisplayNode::Key(ref pk)) => fmt::Debug::fmt(pk, f)?,
                 (_, DisplayNode::RawKeyHash(ref h)) => fmt::Debug::fmt(h, f)?,
@@ -246,6 +265,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
             Terminal::Hash256(..) => "hash256",
             Terminal::Ripemd160(..) => "ripemd160",
             Terminal::Hash160(..) => "hash160",
+            Terminal::TxTemplate(..) => "txtmpl",
+            Terminal::InscribePre(..) => "inscribe_pre",
+            Terminal::InscribePost(..) => "inscribe_post",
             Terminal::Alt(..) => "a",
             Terminal::Swap(..) => "s",
             Terminal::Check(ref sub) if matches!(sub.as_inner(), Terminal::PkK(..)) => "pk",
@@ -343,6 +365,10 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Ord for Terminal<Pk, Ctx> {
                         (DisplayNode::Hash256(me), DisplayNode::Hash256(you)) => me.cmp(you),
                         (DisplayNode::Ripemd160(me), DisplayNode::Ripemd160(you)) => me.cmp(you),
                         (DisplayNode::Hash160(me), DisplayNode::Hash160(you)) => me.cmp(you),
+                        (DisplayNode::TxTemplate(me), DisplayNode::TxTemplate(you)) => me.cmp(you),
+                        (DisplayNode::Inscriptions(me), DisplayNode::Inscriptions(you)) => {
+                            me.cmp(you)
+                        }
                         _ => unreachable!(
                             "if the type of a node differs, its parent must have differed"
                         ),

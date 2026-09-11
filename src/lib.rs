@@ -119,6 +119,8 @@ pub mod expression;
 pub mod interpreter;
 pub mod iter;
 pub mod miniscript;
+/// Exact inscription authoring and envelope discovery.
+pub mod ord;
 pub mod plan;
 pub mod policy;
 mod primitives;
@@ -444,6 +446,8 @@ pub enum Error {
     UnexpectedStart,
     /// Got something we were not expecting
     Unexpected(String),
+    /// An inscription cannot be represented without changing script bytes.
+    InscriptionError(String),
     /// Encountered a wrapping character that we don't recognize
     UnknownWrapper(char),
     /// Parsed a miniscript and the result was not of type T
@@ -514,6 +518,7 @@ impl fmt::Display for Error {
             Error::AddrError(ref e) => fmt::Display::fmt(e, f),
             Error::AddrP2shError(ref e) => fmt::Display::fmt(e, f),
             Error::UnexpectedStart => f.write_str("unexpected start of script"),
+            Error::InscriptionError(ref s) => write!(f, "inscription error: {}", s),
             Error::Unexpected(ref s) => write!(f, "unexpected «{}»", s),
             Error::UnknownWrapper(ch) => write!(f, "unknown wrapper «{}:»", ch),
             Error::NonTopLevel(ref s) => write!(f, "non-T miniscript: {}", s),
@@ -563,6 +568,7 @@ impl std::error::Error for Error {
 
         match self {
             UnexpectedStart
+            | InscriptionError(_)
             | Unexpected(_)
             | UnknownWrapper(_)
             | NonTopLevel(_)

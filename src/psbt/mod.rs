@@ -12,8 +12,9 @@ use core::fmt;
 #[cfg(feature = "std")]
 use std::error;
 
-use bitcoin::hashes::{hash160, sha256d, Hash};
-use bitcoin::psbt::{self, Psbt};
+use bitcoin::consensus::Encodable;
+use bitcoin::hashes::{hash160, sha256, sha256d, Hash};
+use bitcoin::psbt::{self, Psbt, PsbtSighashType};
 #[cfg(not(test))] // https://github.com/rust-lang/rust/issues/121684
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::{Secp256k1, VerifyOnly};
@@ -36,6 +37,8 @@ pub use self::finalizer::{finalize, finalize_mall, interpreter_check};
 /// Error type for entire Psbt
 #[derive(Debug)]
 pub enum Error {
+    /// A transaction must contain an input before it can be finalized.
+    NoInputs,
     /// Input Error type
     InputError(InputError, usize),
     /// Wrong Input Count
@@ -43,6 +46,13 @@ pub enum Error {
         /// Input count in tx
         in_tx: usize,
         /// Input count in psbt
+        in_map: usize,
+    },
+    /// The output metadata does not match the unsigned transaction.
+    WrongOutputCount {
+        /// Output count in the transaction.
+        in_tx: usize,
+        /// Output count in the PSBT.
         in_map: usize,
     },
     /// Psbt Input index out of bounds
@@ -57,6 +67,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Error::NoInputs => write!(f, "PSBT unsigned transaction has no inputs"),
+            Error::WrongOutputCount { in_tx, in_map } => {
+                write!(f, "PSBT had {} outputs in transaction but {} outputs in map", in_tx, in_map)
+            }
             Error::InputError(ref inp_err, index) => write!(f, "{} at index {}", inp_err, index),
             Error::WrongInputCount { in_tx, in_map } => {
                 write!(f, "PSBT had {} inputs in transaction but {} inputs in map", in_tx, in_map)
@@ -77,7 +91,10 @@ impl error::Error for Error {
 
         match self {
             InputError(e, _) => Some(e),
-            WrongInputCount { .. } | InputIdxOutofBounds { .. } => None,
+            NoInputs
+            | WrongInputCount { .. }
+            | WrongOutputCount { .. }
+            | InputIdxOutofBounds { .. } => None,
         }
     }
 }
@@ -129,6 +146,14 @@ pub enum InputError {
     MissingWitnessScript,
     ///Missing both the witness and non-witness utxo
     MissingUtxo,
+    /// Missing transaction or PSBT input at the requested index.
+    MissingInput,
+    /// The referenced output does not exist in the non-witness UTXO.
+    NonWitnessUtxoOutOfBounds(u32),
+    /// The unsigned transaction contains a scriptSig.
+    NonEmptyScriptSig,
+    /// The unsigned transaction contains a witness.
+    NonEmptyWitness,
     /// Non empty Witness script for p2sh
     NonEmptyWitnessScript,
     /// Non empty Redeem script
@@ -143,6 +168,13 @@ pub enum InputError {
         got: sighash::EcdsaSighashType,
         /// the corresponding publickey
         pubkey: bitcoin::PublicKey,
+    },
+    /// A signature does not use the explicitly requested PSBT sighash type.
+    SighashMismatch {
+        /// The raw sighash flag declared in the PSBT input.
+        required: u32,
+        /// The raw sighash flag carried by the signature.
+        got: u32,
     },
 }
 
@@ -161,6 +193,11 @@ impl error::Error for InputError {
             | MissingPubkey
             | MissingWitnessScript
             | MissingUtxo
+            | MissingInput
+            | NonWitnessUtxoOutOfBounds(_)
+            | NonEmptyScriptSig
+            | NonEmptyWitness
+            | SighashMismatch { .. }
             | NonEmptyWitnessScript
             | NonEmptyRedeemScript
             | NonStandardSighashType(_)
@@ -193,6 +230,19 @@ impl fmt::Display for InputError {
                 witness_script, p2wsh_expected
             ),
             InputError::MiniscriptError(ref e) => write!(f, "Miniscript Error: {}", e),
+            InputError::MissingInput => write!(f, "PSBT or transaction input is missing"),
+            InputError::NonWitnessUtxoOutOfBounds(vout) => {
+                write!(f, "Non-witness UTXO has no output {}", vout)
+            }
+            InputError::NonEmptyScriptSig => {
+                write!(f, "PSBT unsigned transaction contains a scriptSig")
+            }
+            InputError::NonEmptyWitness => {
+                write!(f, "PSBT unsigned transaction contains a witness")
+            }
+            InputError::SighashMismatch { required, got } => {
+                write!(f, "Signature sighash {} differs from PSBT declaration {}", got, required)
+            }
             InputError::MissingWitness => write!(f, "PSBT is missing witness"),
             InputError::MissingRedeemScript => write!(f, "PSBT is Redeem script"),
             InputError::MissingUtxo => {
@@ -326,6 +376,16 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfier<'_> {
             .map(|(pk, sig)| (*pk, *sig))
     }
 
+    fn check_tx_template(&self, hash: sha256::Hash) -> bool {
+        let mut candidate = self.psbt.unsigned_tx.clone();
+        for (input, metadata) in candidate.input.iter_mut().zip(&self.psbt.inputs) {
+            if let Some(ref script_sig) = metadata.final_script_sig {
+                input.script_sig = script_sig.clone();
+            }
+        }
+        get_ctv_hash(&candidate, self.index as u32) == hash
+    }
+
     fn check_after(&self, n: absolute::LockTime) -> bool {
         if !self.psbt.unsigned_tx.input[self.index].enables_lock_time() {
             return false;
@@ -376,50 +436,109 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfier<Pk> for PsbtInputSatisfier<'_> {
     }
 }
 
+pub(crate) fn get_ctv_hash(tx: &bitcoin::Transaction, input_index: u32) -> sha256::Hash {
+    let mut ctv_hash = sha256::Hash::engine();
+    tx.version.consensus_encode(&mut ctv_hash).unwrap();
+    tx.lock_time.consensus_encode(&mut ctv_hash).unwrap();
+    if tx.input.iter().any(|input| !input.script_sig.is_empty()) {
+        let mut enc = sha256::Hash::engine();
+        // A nonempty scriptSig commits every input's serialized scriptSig,
+        // including the length prefix of empty scriptSigs on other inputs.
+        for input in &tx.input {
+            input.script_sig.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .to_byte_array()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
+    (tx.input.len() as u32)
+        .consensus_encode(&mut ctv_hash)
+        .unwrap();
+    {
+        let mut enc = sha256::Hash::engine();
+        for seq in tx.input.iter().map(|i| i.sequence) {
+            seq.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .to_byte_array()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
+
+    (tx.output.len() as u32)
+        .consensus_encode(&mut ctv_hash)
+        .unwrap();
+
+    {
+        let mut enc = sha256::Hash::engine();
+        for out in tx.output.iter() {
+            out.consensus_encode(&mut enc).unwrap();
+        }
+        sha256::Hash::from_engine(enc)
+            .to_byte_array()
+            .consensus_encode(&mut ctv_hash)
+            .unwrap();
+    }
+    input_index.consensus_encode(&mut ctv_hash).unwrap();
+    sha256::Hash::from_engine(ctv_hash)
+}
+
 // Basic sanity checks on psbts.
 // rust-bitcoin TODO: (Long term)
 // Brainstorm about how we can enforce these in type system while having a nice API
 fn sanity_check(psbt: &Psbt) -> Result<(), Error> {
+    if psbt.unsigned_tx.input.is_empty() {
+        return Err(Error::NoInputs);
+    }
     if psbt.unsigned_tx.input.len() != psbt.inputs.len() {
         return Err(Error::WrongInputCount {
             in_tx: psbt.unsigned_tx.input.len(),
             in_map: psbt.inputs.len(),
         });
     }
-
-    // Check well-formedness of input data
-    for (index, input) in psbt.inputs.iter().enumerate() {
-        // TODO: fix this after https://github.com/rust-bitcoin/rust-bitcoin/issues/838
-        let target_ecdsa_sighash_ty = match input.sighash_type {
-            Some(psbt_hash_ty) => psbt_hash_ty
-                .ecdsa_hash_ty()
-                .map_err(|e| Error::InputError(InputError::NonStandardSighashType(e), index))?,
-            None => sighash::EcdsaSighashType::All,
-        };
-        for (key, ecdsa_sig) in &input.partial_sigs {
-            let flag = sighash::EcdsaSighashType::from_standard(ecdsa_sig.sighash_type as u32)
-                .map_err(|_| {
-                    Error::InputError(
-                        InputError::Interpreter(interpreter::Error::NonStandardSighash(
-                            ecdsa_sig.to_vec(),
-                        )),
-                        index,
-                    )
-                })?;
-            if target_ecdsa_sighash_ty != flag {
-                return Err(Error::InputError(
-                    InputError::WrongSighashFlag {
-                        required: target_ecdsa_sighash_ty,
-                        got: flag,
-                        pubkey: *key,
-                    },
-                    index,
-                ));
-            }
-            // Signatures are well-formed in psbt partial sigs
+    if psbt.unsigned_tx.output.len() != psbt.outputs.len() {
+        return Err(Error::WrongOutputCount {
+            in_tx: psbt.unsigned_tx.output.len(),
+            in_map: psbt.outputs.len(),
+        });
+    }
+    for (index, input) in psbt.unsigned_tx.input.iter().enumerate() {
+        if !input.script_sig.is_empty() {
+            return Err(Error::InputError(InputError::NonEmptyScriptSig, index));
+        }
+        if !input.witness.is_empty() {
+            return Err(Error::InputError(InputError::NonEmptyWitness, index));
         }
     }
 
+    // BIP-174 constrains every supplied signature when a sighash is declared.
+    // An absent declaration permits any valid signature sighash, and Taproot's
+    // DEFAULT flag must not be interpreted as an ECDSA flag.
+    for (index, input) in psbt.inputs.iter().enumerate() {
+        for signature in input.partial_sigs.values() {
+            check_sighash_type(input.sighash_type, signature.sighash_type as u32)
+                .map_err(|error| Error::InputError(error, index))?;
+        }
+        for signature in input
+            .tap_key_sig
+            .iter()
+            .chain(input.tap_script_sigs.values())
+        {
+            check_sighash_type(input.sighash_type, signature.sighash_type as u32)
+                .map_err(|error| Error::InputError(error, index))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn check_sighash_type(required: Option<PsbtSighashType>, got: u32) -> Result<(), InputError> {
+    if let Some(required) = required {
+        if required.to_u32() != got {
+            return Err(InputError::SighashMismatch { required: required.to_u32(), got });
+        }
+    }
     Ok(())
 }
 
@@ -434,6 +553,8 @@ pub trait PsbtExt {
     /// Finalizes all inputs that it can finalize, and returns an error for each input
     /// that it cannot finalize. Also performs a sanity interpreter check on the
     /// finalized psbt which involves checking the signatures/ preimages/timelocks.
+    /// Inputs that produce scriptSigs are finalized before native witness inputs,
+    /// and success requires verification of the complete finalized transaction.
     ///
     /// Input finalization also fails if it is not possible to satisfy any of the inputs non-malleably
     /// See [finalizer::finalize_mall] if you want to allow malleable satisfactions
@@ -474,7 +595,9 @@ pub trait PsbtExt {
 
     /// Same as [`PsbtExt::finalize_mut`], but only tries to finalize a single input leaving other
     /// inputs as is. Use this when not all of inputs that you are trying to
-    /// satisfy are miniscripts
+    /// satisfy are miniscripts. A single-input CTV check uses currently known
+    /// final scriptSigs; call `extract` or `interpreter_check` after the other
+    /// inputs are finalized to verify the complete transaction.
     ///
     /// # Errors:
     ///
@@ -598,21 +721,7 @@ impl PsbtExt for Psbt {
         &mut self,
         secp: &secp256k1::Secp256k1<C>,
     ) -> Result<(), Vec<Error>> {
-        // Actually construct the witnesses
-        let mut errors = vec![];
-        for index in 0..self.inputs.len() {
-            match finalizer::finalize_input(self, index, secp, /*allow_mall*/ false) {
-                Ok(..) => {}
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        finalizer::finalize_all(self, secp, false)
     }
 
     fn finalize<C: secp256k1::Verification>(
@@ -629,20 +738,7 @@ impl PsbtExt for Psbt {
         &mut self,
         secp: &secp256k1::Secp256k1<C>,
     ) -> Result<(), Vec<Error>> {
-        let mut errors = vec![];
-        for index in 0..self.inputs.len() {
-            match finalizer::finalize_input(self, index, secp, /*allow_mall*/ true) {
-                Ok(..) => {}
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        finalizer::finalize_all(self, secp, true)
     }
 
     fn finalize_mall<C: secp256k1::Verification>(
@@ -660,6 +756,7 @@ impl PsbtExt for Psbt {
         secp: &secp256k1::Secp256k1<C>,
         index: usize,
     ) -> Result<(), Error> {
+        sanity_check(self)?;
         if index >= self.inputs.len() {
             return Err(Error::InputIdxOutofBounds { psbt_inp: self.inputs.len(), index });
         }
@@ -682,10 +779,11 @@ impl PsbtExt for Psbt {
         secp: &secp256k1::Secp256k1<C>,
         index: usize,
     ) -> Result<(), Error> {
+        sanity_check(self)?;
         if index >= self.inputs.len() {
             return Err(Error::InputIdxOutofBounds { psbt_inp: self.inputs.len(), index });
         }
-        finalizer::finalize_input(self, index, secp, /*allow_mall*/ false)
+        finalizer::finalize_input(self, index, secp, /*allow_mall*/ true)
     }
 
     fn finalize_inp_mall<C: secp256k1::Verification>(

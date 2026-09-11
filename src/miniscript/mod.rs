@@ -97,8 +97,15 @@ mod private {
                     Terminal::Hash256(ref x) => Terminal::Hash256(x.clone()),
                     Terminal::Ripemd160(ref x) => Terminal::Ripemd160(x.clone()),
                     Terminal::Hash160(ref x) => Terminal::Hash160(x.clone()),
+                    Terminal::TxTemplate(h) => Terminal::TxTemplate(h),
                     Terminal::True => Terminal::True,
                     Terminal::False => Terminal::False,
+                    Terminal::InscribePre(ref i, _) => {
+                        Terminal::InscribePre(Arc::clone(i), stack.pop().unwrap())
+                    }
+                    Terminal::InscribePost(ref i, _) => {
+                        Terminal::InscribePost(Arc::clone(i), stack.pop().unwrap())
+                    }
                     Terminal::Alt(..) => Terminal::Alt(stack.pop().unwrap()),
                     Terminal::Swap(..) => Terminal::Swap(stack.pop().unwrap()),
                     Terminal::Check(..) => Terminal::Check(stack.pop().unwrap()),
@@ -358,6 +365,10 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
         let mut len = 0;
         for ms in self.pre_order_iter() {
             len += match ms.node {
+                TxTemplate(..) => 35,
+                InscribePre(ref i, _) | InscribePost(ref i, _) => {
+                    i.iter().map(|x| x.size_guess()).sum()
+                }
                 AndV(..) => 0,
                 True | False | Swap(..) | Check(..) | ZeroNotEqual(..) | AndB(..) | OrB(..) => 1,
                 Alt(..) | OrC(..) => 2,
@@ -690,8 +701,15 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
                 Terminal::Hash256(ref x) => Terminal::Hash256(t.hash256(x)?),
                 Terminal::Ripemd160(ref x) => Terminal::Ripemd160(t.ripemd160(x)?),
                 Terminal::Hash160(ref x) => Terminal::Hash160(t.hash160(x)?),
+                Terminal::TxTemplate(h) => Terminal::TxTemplate(h),
                 Terminal::True => Terminal::True,
                 Terminal::False => Terminal::False,
+                Terminal::InscribePre(ref i, _) => {
+                    Terminal::InscribePre(Arc::clone(i), translated.pop().unwrap())
+                }
+                Terminal::InscribePost(ref i, _) => {
+                    Terminal::InscribePost(Arc::clone(i), translated.pop().unwrap())
+                }
                 Terminal::Alt(..) => Terminal::Alt(translated.pop().unwrap()),
                 Terminal::Swap(..) => Terminal::Swap(translated.pop().unwrap()),
                 Terminal::Check(..) => Terminal::Check(translated.pop().unwrap()),
@@ -755,8 +773,15 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
                 Terminal::Hash256(ref x) => Terminal::Hash256(x.clone()),
                 Terminal::Ripemd160(ref x) => Terminal::Ripemd160(x.clone()),
                 Terminal::Hash160(ref x) => Terminal::Hash160(x.clone()),
+                Terminal::TxTemplate(h) => Terminal::TxTemplate(h),
                 Terminal::True => Terminal::True,
                 Terminal::False => Terminal::False,
+                Terminal::InscribePre(ref i, _) => {
+                    Terminal::InscribePre(Arc::clone(i), stack.pop().unwrap())
+                }
+                Terminal::InscribePost(ref i, _) => {
+                    Terminal::InscribePost(Arc::clone(i), stack.pop().unwrap())
+                }
                 Terminal::Alt(..) => Terminal::Alt(stack.pop().unwrap()),
                 Terminal::Swap(..) => Terminal::Swap(stack.pop().unwrap()),
                 Terminal::Check(..) => Terminal::Check(stack.pop().unwrap()),
@@ -864,6 +889,12 @@ impl<Pk: FromStrKey, Ctx: ScriptContext> FromTree for Miniscript<Pk, Ctx> {
             // want to skip their children.
             if n > 0 && node.n_children() == 0 {
                 let parent = node.parent().unwrap();
+                if node.is_first_child()
+                    && (parent.name().ends_with("inscribe_pre")
+                        || parent.name().ends_with("inscribe_post"))
+                {
+                    continue;
+                }
                 if parent.n_children() == 1 {
                     continue;
                 }
@@ -916,6 +947,29 @@ impl<Pk: FromStrKey, Ctx: ScriptContext> FromTree for Miniscript<Pk, Ctx> {
                     .verify_older()
                     .map(Miniscript::older)
                     .map_err(Error::Parse),
+                "inscribe_pre" | "inscribe_post" => {
+                    node.verify_n_children("inscription", 2..=2)
+                        .map_err(From::from)
+                        .map_err(Error::Parse)?;
+                    let field = node.first_child().unwrap();
+                    field
+                        .verify_n_children("inscription data", 0..=0)
+                        .map_err(From::from)
+                        .map_err(Error::Parse)?;
+                    let script = bitcoin::ScriptBuf::from_hex(field.name())
+                        .map_err(|e| Error::InscriptionError(e.to_string()))?;
+                    let inscriptions = Arc::new(crate::ord::parse_inscriptions(&script)?);
+                    let child = stack.pop().unwrap();
+                    Miniscript::from_ast(if frag_name == "inscribe_pre" {
+                        Terminal::InscribePre(inscriptions, child)
+                    } else {
+                        Terminal::InscribePost(inscriptions, child)
+                    })
+                }
+                "txtmpl" => node
+                    .verify_terminal_parent("txtmpl", "template hash")
+                    .map_err(Error::Parse)
+                    .and_then(|h| Miniscript::from_ast(Terminal::TxTemplate(h))),
                 "sha256" => node
                     .verify_terminal_parent("sha256", "hash")
                     .map(Miniscript::sha256)

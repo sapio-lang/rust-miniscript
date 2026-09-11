@@ -25,7 +25,7 @@ use crate::iter::TreeLike as _;
 use crate::miniscript::{Miniscript, ScriptContext};
 use crate::sync::Arc;
 #[cfg(all(not(feature = "std"), not(test)))]
-use crate::Vec;
+use crate::{Box, Vec};
 use crate::{Error, MiniscriptKey, Terminal, Threshold};
 
 /// Policy entailment algorithm maximum number of terminals allowed.
@@ -128,6 +128,15 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Liftable<Pk> for Miniscript<Pk, Ctx>
                 Terminal::Hash256(ref h) => Arc::new(Semantic::Hash256(h.clone())),
                 Terminal::Ripemd160(ref h) => Arc::new(Semantic::Ripemd160(h.clone())),
                 Terminal::Hash160(ref h) => Arc::new(Semantic::Hash160(h.clone())),
+                Terminal::TxTemplate(h) => Arc::new(Semantic::TxTemplate(h)),
+                Terminal::InscribePre(ref inscriptions, _)
+                | Terminal::InscribePost(ref inscriptions, _) => {
+                    let mut child = stack.pop().unwrap();
+                    for inscription in inscriptions.iter().rev() {
+                        child = Arc::new(Semantic::Inscribe(Box::new(inscription.clone()), child));
+                    }
+                    child
+                }
                 Terminal::False => Arc::new(Semantic::Unsatisfiable),
                 Terminal::True => Arc::new(Semantic::Trivial),
                 Terminal::Alt(..)
@@ -205,6 +214,10 @@ impl<Pk: MiniscriptKey> Liftable<Pk> for Concrete<Pk> {
             Concrete::Hash256(ref h) => Semantic::Hash256(h.clone()),
             Concrete::Ripemd160(ref h) => Semantic::Ripemd160(h.clone()),
             Concrete::Hash160(ref h) => Semantic::Hash160(h.clone()),
+            Concrete::TxTemplate(h) => Semantic::TxTemplate(h),
+            Concrete::Inscribe(ref i, ref sub) => {
+                Semantic::Inscribe(i.clone(), Arc::new(sub.lift()?))
+            }
             Concrete::And(ref subs) => {
                 let semantic_subs: Result<Vec<Semantic<Pk>>, Error> =
                     subs.iter().map(Liftable::lift).collect();

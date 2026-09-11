@@ -24,6 +24,8 @@ use crate::{MiniscriptKey, Terminal};
 /// Detailed type of a typechecker error
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum ErrorKind {
+    /// An inscription is empty or exceeds a field push bound.
+    InvalidInscription,
     /// Passed a `z` argument to a `d` wrapper when `z` was expected
     NonZeroDupIf,
     /// Many fragments (all disjunctions except `or_i` as well as
@@ -71,6 +73,7 @@ pub struct Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.error {
+            ErrorKind::InvalidInscription => f.write_str("invalid inscription"),
             ErrorKind::NonZeroDupIf => write!(
                 f,
                 "fragment «{}» represents needs to be `z`, needs to consume zero elements from the stack",
@@ -239,6 +242,19 @@ impl Type {
 
     /// Constructor for the type of the `after` and `older` fragments.
     pub const fn time() -> Self { Type { corr: Correctness::time(), mall: Malleability::time() } }
+
+    /// Type of a CTV predicate.
+    pub const fn tx_template() -> Self {
+        Type {
+            corr: Correctness {
+                base: Base::V,
+                input: Input::Zero,
+                dissatisfiable: false,
+                unit: false,
+            },
+            mall: Malleability { dissat: Dissat::None, safe: true, non_malleable: true },
+        }
+    }
 
     /// Constructor for the type of the `a:` fragment.
     pub const fn cast_alt(self) -> Result<Self, ErrorKind> {
@@ -466,6 +482,14 @@ impl Type {
             Terminal::Hash256(..) => Ok(Self::hash()),
             Terminal::Ripemd160(..) => Ok(Self::hash()),
             Terminal::Hash160(..) => Ok(Self::hash()),
+            Terminal::TxTemplate(..) => Ok(Self::tx_template()),
+            Terminal::InscribePre(ref i, ref sub) | Terminal::InscribePost(ref i, ref sub) => {
+                wrap_err(if i.is_empty() || i.iter().any(|x| x.validate().is_err()) {
+                    Err(ErrorKind::InvalidInscription)
+                } else {
+                    Ok(sub.ty)
+                })
+            }
             Terminal::Alt(ref sub) => wrap_err(Self::cast_alt(sub.ty)),
             Terminal::Swap(ref sub) => wrap_err(Self::cast_swap(sub.ty)),
             Terminal::Check(ref sub) => wrap_err(Self::cast_check(sub.ty)),

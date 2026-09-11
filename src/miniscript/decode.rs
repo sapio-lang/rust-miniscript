@@ -52,12 +52,14 @@ mod private {
     impl Sealed for bitcoin::secp256k1::XOnlyPublicKey {}
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum NonTerm {
     Expression,
     WExpression,
     Swap,
     MaybeAndV,
+    InscribePre,
+    InscribePost(Arc<Vec<crate::ord::Inscription>>),
     Alt,
     Check,
     DupIf,
@@ -117,6 +119,12 @@ pub enum Terminal<Pk: MiniscriptKey, Ctx: ScriptContext> {
     Ripemd160(Pk::Ripemd160),
     /// `SIZE 32 EQUALVERIFY HASH160 <hash> EQUAL`
     Hash160(Pk::Hash160),
+    /// BIP119 transaction template predicate.
+    TxTemplate(sha256::Hash),
+    /// Inscription envelopes preceding the wrapped script.
+    InscribePre(Arc<Vec<crate::ord::Inscription>>, Arc<Miniscript<Pk, Ctx>>),
+    /// Inscription envelopes following the wrapped script.
+    InscribePost(Arc<Vec<crate::ord::Inscription>>, Arc<Miniscript<Pk, Ctx>>),
     // Wrappers
     /// `TOALTSTACK [E] FROMALTSTACK`
     Alt(Arc<Miniscript<Pk, Ctx>>),
@@ -172,6 +180,13 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Clone for Terminal<Pk, Ctx> {
             Terminal::Hash256(ref x) => Terminal::Hash256(x.clone()),
             Terminal::Ripemd160(ref x) => Terminal::Ripemd160(x.clone()),
             Terminal::Hash160(ref x) => Terminal::Hash160(x.clone()),
+            Terminal::TxTemplate(h) => Terminal::TxTemplate(*h),
+            Terminal::InscribePre(i, sub) => {
+                Terminal::InscribePre(Arc::clone(i), Arc::new(Miniscript::clone(sub)))
+            }
+            Terminal::InscribePost(i, sub) => {
+                Terminal::InscribePost(Arc::clone(i), Arc::new(Miniscript::clone(sub)))
+            }
             Terminal::True => Terminal::True,
             Terminal::False => Terminal::False,
             Terminal::Alt(ref sub) => Terminal::Alt(Arc::new(Miniscript::clone(sub))),
@@ -230,6 +245,13 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> PartialEq for Terminal<Pk, Ctx> {
                 (Terminal::Hash256(h1), Terminal::Hash256(h2)) if h1 != h2 => return false,
                 (Terminal::Ripemd160(h1), Terminal::Ripemd160(h2)) if h1 != h2 => return false,
                 (Terminal::Hash160(h1), Terminal::Hash160(h2)) if h1 != h2 => return false,
+                (Terminal::TxTemplate(h1), Terminal::TxTemplate(h2)) if h1 != h2 => return false,
+                (Terminal::InscribePre(i, _), Terminal::InscribePre(j, _))
+                | (Terminal::InscribePost(i, _), Terminal::InscribePost(j, _))
+                    if i != j =>
+                {
+                    return false
+                }
                 (Terminal::Multi(th1), Terminal::Multi(th2)) if th1 != th2 => return false,
                 (Terminal::MultiA(th1), Terminal::MultiA(th2)) if th1 != th2 => return false,
                 _ => {
@@ -258,6 +280,8 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> core::hash::Hash for Terminal<Pk, Ct
                 Terminal::Hash256(h) => h.hash(hasher),
                 Terminal::Ripemd160(h) => h.hash(hasher),
                 Terminal::Hash160(h) => h.hash(hasher),
+                Terminal::TxTemplate(h) => h.hash(hasher),
+                Terminal::InscribePre(i, _) | Terminal::InscribePost(i, _) => i.hash(hasher),
                 Terminal::Thresh(th) => {
                     th.k().hash(hasher);
                     th.n().hash(hasher);
@@ -343,8 +367,14 @@ pub fn decode<Ctx: ScriptContext>(
     loop {
         match non_term.pop() {
             Some(NonTerm::Expression) => {
+                non_term.push(NonTerm::InscribePre);
                 match_token!(
                     tokens,
+                    Tk::Inscription(script) => {
+                        tokens.un_next(Tk::Inscription(script));
+                        non_term.push(NonTerm::InscribePost(take_inscriptions(tokens)?));
+                        non_term.push(NonTerm::Expression);
+                    },
                     // pubkey
                     Tk::Bytes33(pk) => {
                         let ret = Ctx::Key::from_slice(&pk)
@@ -371,6 +401,9 @@ pub fn decode<Ctx: ScriptContext>(
                     Tk::Bytes32(pk) => {
                         let ret = Ctx::Key::from_slice(&pk).map_err(|e| Error::PubKeyCtxError(e, Ctx::name_str()))?;
                         term.push(Miniscript::pk_k(ret));
+                    },
+                    Tk::Drop, Tk::CheckTemplateVerify, Tk::Bytes32(h) => {
+                        term.push(Miniscript::from_ast(Terminal::TxTemplate(sha256::Hash::from_byte_array(h)))?);
                     },
                     // checksig
                     Tk::CheckSig => {
@@ -557,6 +590,13 @@ pub fn decode<Ctx: ScriptContext>(
                     },
                 );
             }
+            Some(NonTerm::InscribePre) => {
+                if matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+                    let i = take_inscriptions(tokens)?;
+                    term.reduce1(|sub| Terminal::InscribePre(i, sub))?;
+                }
+            }
+            Some(NonTerm::InscribePost(i)) => term.reduce1(|sub| Terminal::InscribePost(i, sub))?,
             Some(NonTerm::MaybeAndV) => {
                 // Handle `and_v` prefixing
                 if is_and_v(tokens) {
@@ -669,12 +709,17 @@ pub fn decode<Ctx: ScriptContext>(
                 );
             }
             Some(NonTerm::WExpression) => {
-                // W expression must be either from swap or Fromaltstack
-                match_token!(tokens,
-                    Tk::FromAltStack => { non_term.push(NonTerm::Alt);},
-                    tok => { tokens.un_next(tok); non_term.push(NonTerm::Swap);},);
-                non_term.push(NonTerm::MaybeAndV);
-                non_term.push(NonTerm::Expression);
+                non_term.push(NonTerm::InscribePre);
+                if matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+                    non_term.push(NonTerm::InscribePost(take_inscriptions(tokens)?));
+                    non_term.push(NonTerm::WExpression);
+                } else {
+                    match_token!(tokens,
+                        Tk::FromAltStack => { non_term.push(NonTerm::Alt); },
+                        tok => { tokens.un_next(tok); non_term.push(NonTerm::Swap); },);
+                    non_term.push(NonTerm::MaybeAndV);
+                    non_term.push(NonTerm::Expression);
+                }
             }
             None => {
                 // Done :)
@@ -686,6 +731,17 @@ pub fn decode<Ctx: ScriptContext>(
     assert_eq!(non_term.len(), 0);
     assert_eq!(term.0.len(), 1);
     Ok(term.pop().unwrap())
+}
+
+fn take_inscriptions(tokens: &mut TokenIter) -> Result<Arc<Vec<crate::ord::Inscription>>, Error> {
+    let mut inscriptions = Vec::new();
+    while matches!(tokens.peek(), Some(Tk::Inscription(_))) {
+        if let Some(Tk::Inscription(script)) = tokens.next() {
+            inscriptions.extend(crate::ord::parse_inscriptions(&script)?.into_iter().rev());
+        }
+    }
+    inscriptions.reverse();
+    Ok(Arc::new(inscriptions))
 }
 
 fn is_and_v(tokens: &mut TokenIter) -> bool {

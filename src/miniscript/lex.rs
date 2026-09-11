@@ -13,9 +13,10 @@ use bitcoin::hex::DisplayHex as _;
 use crate::prelude::*;
 
 /// Atom of a tokenized version of a script
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(missing_docs)]
 pub enum Token {
+    Inscription(crate::sync::Arc<bitcoin::ScriptBuf>),
     BoolAnd,
     BoolOr,
     Add,
@@ -26,6 +27,7 @@ pub enum Token {
     CheckMultiSig,
     CheckSequenceVerify,
     CheckLockTimeVerify,
+    CheckTemplateVerify,
     FromAltStack,
     ToAltStack,
     Drop,
@@ -52,7 +54,7 @@ pub enum Token {
 
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self {
             Token::Num(n) => write!(f, "#{}", n),
             Token::Hash20(b) => write!(f, "{}", b.as_hex()),
             Token::Bytes32(b) => write!(f, "{}", b.as_hex()),
@@ -92,12 +94,44 @@ impl Iterator for TokenIter {
     fn next(&mut self) -> Option<Token> { self.0.pop() }
 }
 
+// The instruction iterator has already validated the encoded length.
+fn instruction_size(opcode: u8, instruction: &script::Instruction) -> usize {
+    match instruction {
+        script::Instruction::Op(_) => 1,
+        script::Instruction::PushBytes(bytes) => {
+            bytes.len()
+                + match opcode {
+                    0x4c => 2,
+                    0x4d => 3,
+                    0x4e => 5,
+                    _ => 1,
+                }
+        }
+    }
+}
+
 /// Tokenize a script
 pub fn lex(script: &'_ script::Script) -> Result<Vec<Token>, Error> {
     let mut ret = Vec::with_capacity(script.len());
 
-    for ins in script.instructions_minimal() {
-        match ins.map_err(Error::Script)? {
+    let mut it = script.instructions();
+    let mut position = 0;
+    while let Some(ins) = it.next() {
+        let instruction = ins.map_err(Error::Script)?;
+        let start = position;
+        let opcode = script.as_bytes()[start];
+        position += instruction_size(opcode, &instruction);
+        if let script::Instruction::PushBytes(bytes) = instruction {
+            let bytes = bytes.as_bytes();
+            if (opcode == 0x4c && bytes.len() < 76)
+                || (opcode == 0x4d && bytes.len() < 0x100)
+                || (opcode == 0x4e && bytes.len() < 0x10000)
+                || (bytes.len() == 1 && (bytes[0] == 0x81 || (1..=16).contains(&bytes[0])))
+            {
+                return Err(Error::Script(script::Error::NonMinimalPush));
+            }
+        }
+        match instruction {
             script::Instruction::Op(opcodes::all::OP_BOOLAND) => {
                 ret.push(Token::BoolAnd);
             }
@@ -139,6 +173,9 @@ pub fn lex(script: &'_ script::Script) -> Result<Vec<Token>, Error> {
             script::Instruction::Op(opcodes::all::OP_CSV) => {
                 ret.push(Token::CheckSequenceVerify);
             }
+            script::Instruction::Op(opcodes::all::OP_NOP4) => {
+                ret.push(Token::CheckTemplateVerify);
+            }
             script::Instruction::Op(opcodes::all::OP_CLTV) => {
                 ret.push(Token::CheckLockTimeVerify);
             }
@@ -158,7 +195,47 @@ pub fn lex(script: &'_ script::Script) -> Result<Vec<Token>, Error> {
                 ret.push(Token::Add);
             }
             script::Instruction::Op(opcodes::all::OP_IF) => {
-                ret.push(Token::If);
+                if ret.last() == Some(&Token::Num(0)) {
+                    ret.pop();
+                    let protocol = it
+                        .next()
+                        .ok_or_else(|| Error::Inscription("missing protocol".into()))?
+                        .map_err(Error::Script)?;
+                    position += instruction_size(script.as_bytes()[position], &protocol);
+                    if protocol
+                        != script::Instruction::PushBytes(crate::ord::push_bytes(
+                            crate::ord::PROTOCOL_ID,
+                        ))
+                    {
+                        return Err(Error::Inscription("unknown protocol".into()));
+                    }
+                    loop {
+                        let item = it
+                            .next()
+                            .ok_or_else(|| Error::Inscription("missing ENDIF".into()))?
+                            .map_err(Error::Script)?;
+                        position += instruction_size(script.as_bytes()[position], &item);
+                        match item {
+                            script::Instruction::Op(opcodes::all::OP_ENDIF) => break,
+                            script::Instruction::PushBytes(_) => {}
+                            script::Instruction::Op(op)
+                                if matches!(
+                                    op.classify(opcodes::ClassifyContext::TapScript),
+                                    opcodes::Class::PushNum(_)
+                                ) => {}
+                            _ => {
+                                return Err(Error::Inscription("envelope must be push-only".into()))
+                            }
+                        }
+                    }
+                    ret.push(Token::Inscription(crate::sync::Arc::new(
+                        bitcoin::ScriptBuf::from_bytes(
+                            script.as_bytes()[start - 1..position].to_vec(),
+                        ),
+                    )));
+                } else {
+                    ret.push(Token::If);
+                }
             }
             script::Instruction::Op(opcodes::all::OP_IFDUP) => {
                 ret.push(Token::IfDup);
@@ -186,7 +263,7 @@ pub fn lex(script: &'_ script::Script) -> Result<Vec<Token>, Error> {
                     Some(op @ &Token::Equal)
                     | Some(op @ &Token::CheckSig)
                     | Some(op @ &Token::CheckMultiSig) => {
-                        return Err(Error::NonMinimalVerify(*op));
+                        return Err(Error::NonMinimalVerify(op.clone()));
                     }
                     _ => {}
                 }
@@ -284,6 +361,8 @@ pub fn lex(script: &'_ script::Script) -> Result<Vec<Token>, Error> {
 /// Lexer error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    /// An inscription envelope is incomplete or not push-only.
+    Inscription(String),
     /// Parsed a negative number.
     InvalidInt {
         /// The bytes of the push that were attempted to be parsed.
@@ -309,6 +388,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::Inscription(ref e) => write!(f, "invalid inscription: {}", e),
             Self::Script(ref e) => e.fmt(f),
             Self::InvalidInt { ref bytes, ref err } => write!(f, "push {} of length {} is not a key, hash or minimal integer: {}", bytes.as_bytes().as_hex(), bytes.len(), err),
             Self::InvalidOpcode(ref op) => write!(f, "found opcode {} which does not occur in Miniscript", op),
@@ -323,7 +403,7 @@ impl std::error::Error for Error {
     fn cause(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::InvalidInt { ref err, .. } => Some(err),
-            Self::InvalidOpcode(..) => None,
+            Self::InvalidOpcode(..) | Self::Inscription(..) => None,
             Self::NegativeInt { .. } => None,
             Self::NonMinimalVerify(..) => None,
             Self::Script(ref e) => Some(e),

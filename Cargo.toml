@@ -23,13 +23,14 @@ base64 = ["bitcoin/base64"]
 
 [dependencies]
 bech32 = { version = "0.11.0", default-features = false, features = ["alloc"] }
-bitcoin = { version = "0.32.6", default-features = false }
+bitcoin = { version = "=0.32.102", default-features = false }
 hex = { package = "hex-conservative", default-features = false, features = ["alloc"], version = "1.0.0" }
 
 serde = { version = "1.0.103", optional = true }
 
 [dev-dependencies]
 serde_test = "1.0.147"
+serde_json = "1"
 bitcoin = { version = "0.32.0", features = ["base64"] }
 secp256k1 = {version = "0.29.0", features = ["rand-std"]}
 
@@ -73,3 +74,56 @@ required-features = ["compiler"]
 [workspace]
 members = ["fuzz"]
 exclude = ["embedded", "bitcoind-tests"]
+
+[[test]]
+name = "ctv_finalization"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "ctv_hash"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_analysis"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_compiler"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_discovery"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_envelopes"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_parsing"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_policy"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_properties"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "inscription_spending"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "psbt_finalized"
+required-features = ["compiler", "serde"]
+
+[[test]]
+name = "psbt_sighash"
+required-features = ["compiler", "serde"]
+
+[[example]]
+name = "inscription_node_fixture"
+path = "tests/fixtures/inscription_node.rs"
+required-features = ["std"]

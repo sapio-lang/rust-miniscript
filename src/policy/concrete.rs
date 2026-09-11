@@ -60,6 +60,10 @@ pub enum Policy<Pk: MiniscriptKey> {
     Ripemd160(Pk::Ripemd160),
     /// A HASH160 whose preimage must be provided to satisfy the descriptor.
     Hash160(Pk::Hash160),
+    /// A BIP119 transaction-template commitment.
+    TxTemplate(bitcoin::hashes::sha256::Hash),
+    /// An inscription effect carried by a spending policy.
+    Inscribe(Box<crate::ord::Inscription>, Arc<Policy<Pk>>),
     /// A list of sub-policies, all of which must be satisfied.
     And(Vec<Arc<Policy<Pk>>>),
     /// A list of sub-policies, one of which must be satisfied, along with
@@ -76,6 +80,8 @@ pub enum PolicyError {
     HeightTimelockCombination,
     /// Duplicate Public Keys.
     DuplicatePubKeys,
+    /// An inscription field exceeds its script element bound.
+    InvalidInscription,
 }
 
 /// Descriptor context for [`Policy`] compilation into a [`Descriptor`].
@@ -99,6 +105,7 @@ impl fmt::Display for PolicyError {
             PolicyError::HeightTimelockCombination => {
                 f.write_str("Cannot lift policies that have a heightlock and timelock combination")
             }
+            PolicyError::InvalidInscription => f.write_str("invalid inscription"),
             PolicyError::DuplicatePubKeys => f.write_str("Policy contains duplicate keys"),
         }
     }
@@ -110,7 +117,7 @@ impl error::Error for PolicyError {
         use self::PolicyError::*;
 
         match self {
-            HeightTimelockCombination | DuplicatePubKeys => None,
+            HeightTimelockCombination | DuplicatePubKeys | InvalidInscription => None,
         }
     }
 }
@@ -549,6 +556,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                 Hash256(ref h) => t.hash256(h).map(Hash256)?,
                 Ripemd160(ref h) => t.ripemd160(h).map(Ripemd160)?,
                 Hash160(ref h) => t.hash160(h).map(Hash160)?,
+                TxTemplate(h) => TxTemplate(*h),
+                Inscribe(i, _) => Inscribe(i.clone(), translated.pop().unwrap()),
                 Older(ref n) => Older(*n),
                 After(ref n) => After(*n),
                 And(ref subs) => And((0..subs.len()).map(|_| translated.pop().unwrap()).collect()),
@@ -574,6 +583,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
         for data in Arc::new(self).rtl_post_order_iter() {
             let new_policy = match data.node.as_ref() {
                 Policy::Key(ref k) if k.clone() == *key => Some(Policy::Unsatisfiable),
+                Inscribe(i, _) => Some(Inscribe(i.clone(), translated.pop().unwrap())),
                 And(ref subs) => {
                     Some(And((0..subs.len()).map(|_| translated.pop().unwrap()).collect()))
                 }
@@ -687,6 +697,7 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
                     let iter = (0..thresh.n()).map(|_| infos.pop().unwrap());
                     TimelockInfo::combine_threshold(thresh.k(), iter)
                 }
+                Inscribe(_, _) => infos.pop().unwrap(),
                 _ => TimelockInfo::default(),
             };
             infos.push(info);
@@ -700,6 +711,11 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
     /// Validity condition also checks whether there is a possible satisfaction
     /// combination of timelocks and heightlocks
     pub fn is_valid(&self) -> Result<(), PolicyError> {
+        for node in self.pre_order_iter() {
+            if let Policy::Inscribe(i, _) = node {
+                i.validate().map_err(|_| PolicyError::InvalidInscription)?;
+            }
+        }
         self.check_timelocks()?;
         self.check_duplicate_keys()?;
         Ok(())
@@ -718,7 +734,8 @@ impl<Pk: MiniscriptKey> Policy<Pk> {
         let mut acc = vec![];
         for data in self.rtl_post_order_iter() {
             let new = match data.node {
-                Unsatisfiable | Trivial | Key(_) => (true, true),
+                Unsatisfiable | Trivial | Key(_) | TxTemplate(_) => (true, true),
+                Inscribe(_, _) => acc.pop().unwrap(),
                 Sha256(_) | Hash256(_) | Ripemd160(_) | Hash160(_) | After(_) | Older(_) => {
                     (false, true)
                 }
@@ -767,6 +784,8 @@ impl<Pk: MiniscriptKey> fmt::Debug for Policy<Pk> {
             Policy::Hash256(ref h) => write!(f, "hash256({})", h),
             Policy::Ripemd160(ref h) => write!(f, "ripemd160({})", h),
             Policy::Hash160(ref h) => write!(f, "hash160({})", h),
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => write!(f, "inscribe({},{})", i, sub),
             Policy::And(ref subs) => {
                 f.write_str("and(")?;
                 if !subs.is_empty() {
@@ -804,6 +823,8 @@ impl<Pk: MiniscriptKey> fmt::Display for Policy<Pk> {
             Policy::Hash256(ref h) => write!(f, "hash256({})", h),
             Policy::Ripemd160(ref h) => write!(f, "ripemd160({})", h),
             Policy::Hash160(ref h) => write!(f, "hash160({})", h),
+            Policy::TxTemplate(h) => write!(f, "txtmpl({})", h),
+            Policy::Inscribe(ref i, ref sub) => write!(f, "inscribe({},{})", i, sub),
             Policy::And(ref subs) => {
                 f.write_str("and(")?;
                 if !subs.is_empty() {
@@ -855,6 +876,9 @@ impl<Pk: FromStrKey> expression::FromTree for Policy<Pk> {
             // in policy that have a single child that these might be confused with (we
             // require and, or and thresholds to all have >1 child).
             if let Some(parent) = node.parent() {
+                if node.is_first_child() && parent.name().rsplit('@').next() == Some("inscribe") {
+                    continue;
+                }
                 if parent.n_children() == 1 {
                     continue;
                 }
@@ -906,6 +930,32 @@ impl<Pk: FromStrKey> expression::FromTree for Policy<Pk> {
                         .map_err(Error::Parse),
                     "after" => node.verify_after().map_err(Error::Parse).map(Policy::After),
                     "older" => node.verify_older().map_err(Error::Parse).map(Policy::Older),
+                    "inscribe" => {
+                        node.verify_n_children("inscribe", 2..=2)
+                            .map_err(From::from)
+                            .map_err(Error::Parse)?;
+                        let field = node.first_child().unwrap();
+                        field
+                            .verify_n_children("inscription data", 0..=0)
+                            .map_err(From::from)
+                            .map_err(Error::Parse)?;
+                        let script = bitcoin::ScriptBuf::from_hex(field.name())
+                            .map_err(|e| Error::InscriptionError(e.to_string()))?;
+                        let mut inscriptions = crate::ord::parse_inscriptions(&script)?;
+                        if inscriptions.len() != 1 {
+                            return Err(Error::InscriptionError(
+                                "expected exactly one inscription".into(),
+                            ));
+                        }
+                        Ok(Policy::Inscribe(
+                            Box::new(inscriptions.pop().unwrap()),
+                            stack.pop().unwrap().1,
+                        ))
+                    }
+                    "txtmpl" => node
+                        .verify_terminal_parent("txtmpl", "template hash")
+                        .map(Policy::TxTemplate)
+                        .map_err(Error::Parse),
                     "sha256" => node
                         .verify_terminal_parent("sha256", "hash")
                         .map(Policy::Sha256)
@@ -1041,7 +1091,8 @@ impl<'a, Pk: MiniscriptKey> TreeLike for &'a Policy<Pk> {
 
         match *self {
             Unsatisfiable | Trivial | Key(_) | After(_) | Older(_) | Sha256(_) | Hash256(_)
-            | Ripemd160(_) | Hash160(_) => Tree::Nullary,
+            | Ripemd160(_) | Hash160(_) | TxTemplate(_) => Tree::Nullary,
+            Inscribe(_, ref sub) => Tree::Unary(sub),
             And(ref subs) => Tree::Nary(TreeChildren::And(subs)),
             Or(ref v) => Tree::Nary(TreeChildren::Or(v)),
             Thresh(ref thresh) => Tree::Nary(TreeChildren::And(thresh.data())),
@@ -1070,7 +1121,8 @@ impl<'a, Pk: MiniscriptKey> TreeLike for &'a Arc<Policy<Pk>> {
 
         match ***self {
             Unsatisfiable | Trivial | Key(_) | After(_) | Older(_) | Sha256(_) | Hash256(_)
-            | Ripemd160(_) | Hash160(_) => Tree::Nullary,
+            | Ripemd160(_) | Hash160(_) | TxTemplate(_) => Tree::Nullary,
+            Inscribe(_, ref sub) => Tree::Unary(sub),
             And(ref subs) => Tree::Nary(TreeChildren::And(subs)),
             Or(ref v) => Tree::Nary(TreeChildren::Or(v)),
             Thresh(ref thresh) => Tree::Nary(TreeChildren::And(thresh.data())),

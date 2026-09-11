@@ -108,6 +108,9 @@ pub trait Satisfier<Pk: MiniscriptKey + ToPublicKey> {
     /// this method MUST only allow timelocks of either unit, but not both. Allowing both could cause
     /// miniscript to construct an invalid witness.
     fn check_after(&self, _: absolute::LockTime) -> bool { false }
+
+    /// Whether the supplied BIP119 commitment matches this transaction.
+    fn check_tx_template(&self, _: bitcoin::hashes::sha256::Hash) -> bool { false }
 }
 
 // Allow use of `()` as a "no conditions available" satisfier
@@ -320,6 +323,9 @@ impl<Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &S {
     fn check_older(&self, t: relative::LockTime) -> bool { (**self).check_older(t) }
 
     fn check_after(&self, n: absolute::LockTime) -> bool { (**self).check_after(n) }
+    fn check_tx_template(&self, h: bitcoin::hashes::sha256::Hash) -> bool {
+        (**self).check_tx_template(h)
+    }
 }
 
 impl<Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &mut S {
@@ -380,6 +386,9 @@ impl<Pk: MiniscriptKey + ToPublicKey, S: Satisfier<Pk>> Satisfier<Pk> for &mut S
     fn check_older(&self, t: relative::LockTime) -> bool { (**self).check_older(t) }
 
     fn check_after(&self, n: absolute::LockTime) -> bool { (**self).check_after(n) }
+    fn check_tx_template(&self, h: bitcoin::hashes::sha256::Hash) -> bool {
+        (**self).check_tx_template(h)
+    }
 }
 
 macro_rules! impl_tuple_satisfier {
@@ -513,6 +522,7 @@ macro_rules! impl_tuple_satisfier {
                 None
             }
 
+            fn check_tx_template(&self, h: bitcoin::hashes::sha256::Hash) -> bool { let &($(ref $ty,)*) = self; $( if $ty.check_tx_template(h) { return true; } )* false }
             fn lookup_hash160(&self, h: &Pk::Hash160) -> Option<Preimage32> {
                 let &($(ref $ty,)*) = self;
                 $(
@@ -1329,6 +1339,16 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 relative_timelock: None,
                 absolute_timelock: None,
             },
+            Terminal::TxTemplate(h) => Satisfaction {
+                stack: if stfr.check_tx_template(h) {
+                    Witness::empty()
+                } else {
+                    Witness::Impossible
+                },
+                has_sig: false,
+                relative_timelock: None,
+                absolute_timelock: None,
+            },
             Terminal::True => Satisfaction {
                 stack: Witness::empty(),
                 has_sig: false,
@@ -1341,7 +1361,9 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 relative_timelock: None,
                 absolute_timelock: None,
             },
-            Terminal::Alt(ref sub)
+            Terminal::InscribePre(_, ref sub)
+            | Terminal::InscribePost(_, ref sub)
+            | Terminal::Alt(ref sub)
             | Terminal::Swap(ref sub)
             | Terminal::Check(ref sub)
             | Terminal::Verify(ref sub)
@@ -1625,6 +1647,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 absolute_timelock: None,
             },
             Terminal::True
+            | Terminal::TxTemplate(_)
             | Terminal::Older(_)
             | Terminal::After(_)
             | Terminal::Verify(_)
@@ -1643,7 +1666,9 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 relative_timelock: None,
                 absolute_timelock: None,
             },
-            Terminal::Alt(ref sub)
+            Terminal::InscribePre(_, ref sub)
+            | Terminal::InscribePost(_, ref sub)
+            | Terminal::Alt(ref sub)
             | Terminal::Swap(ref sub)
             | Terminal::Check(ref sub)
             | Terminal::ZeroNotEqual(ref sub) => {

@@ -33,7 +33,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
                 vec![]
             }
 
-            Terminal::Alt(ref node)
+            Terminal::InscribePre(_, ref node)
+            | Terminal::InscribePost(_, ref node)
+            | Terminal::Alt(ref node)
             | Terminal::Swap(ref node)
             | Terminal::Check(ref node)
             | Terminal::DupIf(ref node)
@@ -59,7 +61,9 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Returns child node with given index, if any
     pub fn get_nth_child(&self, n: usize) -> Option<&Miniscript<Pk, Ctx>> {
         match (n, &self.node) {
-            (0, Terminal::Alt(node))
+            (0, Terminal::InscribePre(_, node))
+            | (0, Terminal::InscribePost(_, node))
+            | (0, Terminal::Alt(node))
             | (0, Terminal::Swap(node))
             | (0, Terminal::Check(node))
             | (0, Terminal::DupIf(node))

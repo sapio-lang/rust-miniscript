@@ -103,6 +103,9 @@ pub trait AssetProvider<Pk: MiniscriptKey> {
 
     /// Assert whether an absolute locktime is satisfied
     fn check_after(&self, _: absolute::LockTime) -> bool { false }
+
+    /// Whether the supplied BIP119 commitment matches this transaction.
+    fn check_tx_template(&self, _: bitcoin::hashes::sha256::Hash) -> bool { false }
 }
 
 /// Wrapper around [`Assets`] that logs every query and value returned
@@ -136,6 +139,7 @@ impl AssetProvider<DefiniteDescriptorKey> for LoggerAssetProvider<'_> {
     impl_log_method!(provider_lookup_hash160, hash: &hash160::Hash, -> bool);
     impl_log_method!(check_older, s: relative::LockTime, -> bool);
     impl_log_method!(check_after, t: absolute::LockTime, -> bool);
+    impl_log_method!(check_tx_template, h: bitcoin::hashes::sha256::Hash, -> bool);
 }
 
 impl<T, Pk> AssetProvider<Pk> for T
@@ -201,6 +205,9 @@ where
     fn check_older(&self, s: relative::LockTime) -> bool { Satisfier::check_older(self, s) }
 
     fn check_after(&self, l: absolute::LockTime) -> bool { Satisfier::check_after(self, l) }
+    fn check_tx_template(&self, h: bitcoin::hashes::sha256::Hash) -> bool {
+        Satisfier::check_tx_template(self, h)
+    }
 }
 
 /// Representation of a particular spending path on a descriptor.

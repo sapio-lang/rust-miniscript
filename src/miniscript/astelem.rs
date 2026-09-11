@@ -85,6 +85,23 @@ impl<Pk: MiniscriptKey, Ctx: ScriptContext> Terminal<Pk, Ctx> {
                 .push_opcode(opcodes::all::OP_HASH160)
                 .push_slice(Pk::to_hash160(h).to_byte_array())
                 .push_opcode(opcodes::all::OP_EQUAL),
+            Terminal::TxTemplate(h) => builder
+                .push_slice(h.to_byte_array())
+                .push_opcode(opcodes::all::OP_NOP4)
+                .push_opcode(opcodes::all::OP_DROP),
+            Terminal::InscribePre(ref inscriptions, ref sub) => {
+                for inscription in inscriptions.iter() {
+                    builder = inscription.append_reveal_script_to_builder(builder);
+                }
+                builder.push_astelem(sub)
+            }
+            Terminal::InscribePost(ref inscriptions, ref sub) => {
+                builder = builder.push_astelem(sub);
+                for inscription in inscriptions.iter() {
+                    builder = inscription.append_reveal_script_to_builder(builder);
+                }
+                builder
+            }
             Terminal::True => builder.push_opcode(opcodes::OP_TRUE),
             Terminal::False => builder.push_opcode(opcodes::OP_FALSE),
             Terminal::Alt(ref sub) => builder

@@ -198,6 +198,46 @@ impl ExtData {
 }
 
 impl ExtData {
+    /// Resource bounds for a CTV predicate and its final DROP.
+    pub const fn tx_template() -> Self {
+        Self {
+            pk_cost: 35,
+            has_free_verify: false,
+            static_ops: 2,
+            sat_data: Some(SatData {
+                max_witness_stack_size: 0,
+                max_witness_stack_count: 0,
+                max_script_sig_size: 0,
+                max_exec_stack_count: 1,
+                max_exec_op_count: 0,
+            }),
+            dissat_data: None,
+            timelock_info: TimelockInfo::new(),
+            tree_height: 0,
+        }
+    }
+
+    /// Account for unexecuted inscription envelopes without changing witness needs.
+    pub fn inscribing(mut self, inscriptions: &[crate::ord::Inscription], postfix: bool) -> Self {
+        self.pk_cost += inscriptions.iter().map(|i| i.size_guess()).sum::<usize>();
+        self.static_ops += 2 * inscriptions.len();
+        self.tree_height += 1;
+        if postfix {
+            self.has_free_verify = false;
+        }
+        for data in [&mut self.sat_data, &mut self.dissat_data]
+            .into_iter()
+            .flatten()
+        {
+            data.max_exec_stack_count = if postfix {
+                data.max_exec_stack_count + 1
+            } else {
+                cmp::max(data.max_exec_stack_count, 1)
+            };
+        }
+        self
+    }
+
     /// Confirm invariants of the extra property checker.
     pub fn sanity_checks(&self) {}
 
@@ -953,6 +993,9 @@ impl ExtData {
             Terminal::Hash256(..) => Self::hash256(),
             Terminal::Ripemd160(..) => Self::ripemd160(),
             Terminal::Hash160(..) => Self::hash160(),
+            Terminal::TxTemplate(..) => Self::tx_template(),
+            Terminal::InscribePre(ref i, ref sub) => sub.ext.inscribing(i, false),
+            Terminal::InscribePost(ref i, ref sub) => sub.ext.inscribing(i, true),
             Terminal::Alt(ref sub) => Self::cast_alt(sub.ext),
             Terminal::Swap(ref sub) => Self::cast_swap(sub.ext),
             Terminal::Check(ref sub) => Self::cast_check(sub.ext),

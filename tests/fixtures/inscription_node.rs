@@ -74,7 +74,7 @@ fn cases() -> Vec<(&'static str, ScriptBuf, bool)> {
         .push_opcode(opcodes::OP_FALSE)
         .push_opcode(opcodes::all::OP_IF)
         .push_slice(b"ord")
-        .push_slice(&[])
+        .push_slice([])
         .push_slice(bitcoin::script::PushBytesBuf::try_from(vec![0x5a; 521]).unwrap())
         .push_opcode(opcodes::all::OP_ENDIF)
         .into_script();

@@ -317,9 +317,7 @@ fn malformed_psbt_shapes_are_rejected_by_public_checks() {
     signed_unsigned_tx.unsigned_tx.input[0].script_sig = Builder::new().push_int(1).into_script();
     assert_public_checks_reject(signed_unsigned_tx);
     let mut witnessed_unsigned_tx = psbt;
-    witnessed_unsigned_tx.unsigned_tx.input[0]
-        .witness
-        .push(&[1]);
+    witnessed_unsigned_tx.unsigned_tx.input[0].witness.push([1]);
     assert_public_checks_reject(witnessed_unsigned_tx);
 }
 

@@ -136,10 +136,7 @@ fn inscription_children_remain_visible_to_key_analysis() {
 
 #[test]
 fn inscription_policies_validate_their_child_and_push_sizes() {
-    let invalid = Concrete::<PublicKey>::Inscribe(
-        Box::new(Inscription::default()),
-        Arc::new(Concrete::And(vec![])),
-    );
+    let invalid = Concrete::<PublicKey>::Inscribe(Box::default(), Arc::new(Concrete::And(vec![])));
     #[cfg(feature = "compiler")]
     assert!(matches!(
         invalid.compile::<Segwitv0>(),
@@ -148,7 +145,7 @@ fn inscription_policies_validate_their_child_and_push_sizes() {
     #[cfg(not(feature = "compiler"))]
     let _ = invalid;
     let duplicate = Concrete::Inscribe(
-        Box::new(Inscription::default()),
+        Box::default(),
         Arc::new(Concrete::And(vec![Concrete::Key(key()).into(), Concrete::Key(key()).into()])),
     );
     assert_eq!(duplicate.keys(), vec![&key(), &key()]);
@@ -249,7 +246,7 @@ fn inscription_semantics_recurse_without_discarding_reachable_metadata() {
 #[test]
 fn entailment_explicitly_rejects_unsupported_inscription_effects() {
     let child = Semantic::<String>::Key("alice".into());
-    let inscribed = Semantic::Inscribe(Box::new(Inscription::default()), Arc::new(child.clone()));
+    let inscribed = Semantic::Inscribe(Box::default(), Arc::new(child.clone()));
     assert!(inscribed.clone().entails(child.clone()).is_none());
     assert!(child.clone().entails(inscribed.clone()).is_none());
     let nested =

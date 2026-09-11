@@ -126,7 +126,7 @@ fn assert_wrapped_commitments(envelope: &[u8]) {
         let expression = format!(
             "inscribe_{}({},pk({}))",
             if post { "post" } else { "pre" },
-            envelope.as_hex().to_string(),
+            envelope.as_hex(),
             KEY
         );
         let ms = Ms::from_str(&expression).unwrap();
@@ -231,10 +231,9 @@ fn truncation_at_every_byte_rejects_incomplete_envelopes() {
     for envelope in fixtures {
         for end in 0..envelope.len() {
             let bytes = &envelope[..end];
-            let text = format!("inscribe_post({},pk({}))", bytes.as_hex().to_string(), KEY);
+            let text = format!("inscribe_post({},pk({}))", bytes.as_hex(), KEY);
             assert!(Ms::from_str(&text).is_err(), "prefix {} of {}", end, envelope.len());
-            let script =
-                Script::from_hex(&format!("20{}ac{}", KEY, bytes.as_hex().to_string())).unwrap();
+            let script = Script::from_hex(&format!("20{}ac{}", KEY, bytes.as_hex())).unwrap();
             if end == 0 {
                 // Removing the entire suffix leaves the original key script.
                 assert_eq!(Ms::decode(&script).unwrap().encode(), script);
@@ -262,10 +261,9 @@ fn unknown_tags_are_discoverable_but_cannot_change_a_miniscript_commitment() {
         assert_eq!(raw.len(), 1);
         let parsed: Envelope<Inscription> = raw[0].clone().into();
         assert_eq!(parsed.payload.unrecognized_even_field, tag % 2 == 0);
-        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex().to_string(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex(), KEY);
         assert!(Ms::from_str(&text).is_err(), "tag={}", tag);
-        let script =
-            Script::from_hex(&format!("{}20{}ac", envelope.as_hex().to_string(), KEY)).unwrap();
+        let script = Script::from_hex(&format!("{}20{}ac", envelope.as_hex(), KEY)).unwrap();
         assert!(
             Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err(),
             "tag={}",
@@ -300,7 +298,7 @@ fn all_header_field_orders_preserve_or_reject_the_original_bytes() {
             envelope.extend_from_slice(&[1, TAGS[field], 1, 0x42]);
         }
         envelope.push(0x68);
-        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex().to_string(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_hex(), KEY);
         let result = Ms::from_str(&text);
         assert_eq!(result.is_ok(), order == [0, 1, 2, 3, 4, 5, 6], "order={:?}", order);
         count += 1;
@@ -322,9 +320,9 @@ fn every_single_bit_mutation_is_rejected_or_preserves_exact_script_bytes() {
             mutated[index] ^= 1 << bit;
             for post in [false, true] {
                 let script = if post {
-                    format!("20{}ac{}", KEY, mutated.as_hex().to_string())
+                    format!("20{}ac{}", KEY, mutated.as_hex())
                 } else {
-                    format!("{}20{}ac", mutated.as_hex().to_string(), KEY)
+                    format!("{}20{}ac", mutated.as_hex(), KEY)
                 };
                 let script = Script::from_hex(&script).unwrap();
                 if let Ok(parsed) = Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()) {
@@ -363,7 +361,7 @@ fn generated_nested_combinators_preserve_all_script_commitments() {
                 text = format!(
                     "inscribe_{}({},{})",
                     if post { "post" } else { "pre" },
-                    envelope.as_hex().to_string(),
+                    envelope.as_hex(),
                     text
                 );
                 if post {
@@ -386,15 +384,11 @@ fn generated_nested_combinators_preserve_all_script_commitments() {
 #[test]
 fn nested_taproot_descriptor_preserves_leaf_bytes_and_output_key() {
     let texts = [
-        format!("inscribe_pre({},pk({}))", field_fixture(7, &[0x00]).as_hex().to_string(), KEY),
-        format!(
-            "inscribe_post({},pk({}))",
-            field_fixture(7, &[0x81]).as_hex().to_string(),
-            INTERNAL
-        ),
+        format!("inscribe_pre({},pk({}))", field_fixture(7, &[0x00]).as_hex(), KEY),
+        format!("inscribe_post({},pk({}))", field_fixture(7, &[0x81]).as_hex(), INTERNAL),
         format!(
             "inscribe_pre({},or_i(pk({}),pk({})))",
-            field_fixture(6, &[0x63, 0x68]).as_hex().to_string(),
+            field_fixture(6, &[0x63, 0x68]).as_hex(),
             KEY,
             INTERNAL
         ),
@@ -471,14 +465,12 @@ fn noncanonical_pushes_chunks_and_oversized_fields_are_rejected() {
         envelopes.push(Script::from_hex(hex).unwrap());
     }
     for envelope in envelopes {
-        let text =
-            format!("inscribe_pre({},pk({}))", envelope.as_bytes().as_hex().to_string(), KEY);
+        let text = format!("inscribe_pre({},pk({}))", envelope.as_bytes().as_hex(), KEY);
         assert!(Ms::from_str(&text).is_err(), "{}", text);
         let descriptor = format!("tr({},{})", INTERNAL, text);
         assert!(Descriptor::<XOnlyPublicKey>::from_str(&descriptor).is_err());
         let script =
-            Script::from_hex(&format!("{}20{}ac", envelope.as_bytes().as_hex().to_string(), KEY))
-                .unwrap();
+            Script::from_hex(&format!("{}20{}ac", envelope.as_bytes().as_hex(), KEY)).unwrap();
         assert!(Ms::decode_with_ext(&script, &miniscript::ExtParams::insane()).is_err());
     }
 }

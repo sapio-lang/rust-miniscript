@@ -72,11 +72,12 @@ pub fn test_from_cpp_ms(cl: &Client, testdata: &TestData) {
     let desc_vec = parse_miniscripts(&testdata.pubdata);
     let sks = &testdata.secretdata.sks;
     let pks = &testdata.pubdata.pks;
-    // Generate some blocks
-    let blocks = cl
-        .generate_to_address(500, &cl.new_address().unwrap())
-        .unwrap();
-    assert_eq!(blocks.0.len(), 500);
+    // Keep each mining request within the RPC client's timeout on CI runners.
+    let mining_address = cl.new_address().unwrap();
+    for _ in 0..10 {
+        let blocks = cl.generate_to_address(50, &mining_address).unwrap();
+        assert_eq!(blocks.0.len(), 50);
+    }
 
     // Next send some btc to each address corresponding to the miniscript
     let mut txids = vec![];

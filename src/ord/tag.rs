@@ -1,4 +1,4 @@
-///! Utils for working with ordinals, copied from Ord codebase
+//! Utils for working with ordinals, copied from Ord codebase
 use core::mem;
 
 use super::*;

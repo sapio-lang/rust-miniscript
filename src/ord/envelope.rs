@@ -111,9 +111,9 @@ impl RawEnvelope {
                 .len()
                 .checked_sub(offset)
                 .and_then(|index| input.witness.iter().nth(index))
-                .map(|bytes| Script::from_bytes(bytes));
+                .map(Script::from_bytes);
             if let Some(tapscript) = tapscript {
-                if let Ok(input_envelopes) = Self::from_tapscript(&tapscript, i) {
+                if let Ok(input_envelopes) = Self::from_tapscript(tapscript, i) {
                     envelopes.extend(input_envelopes);
                 }
             }

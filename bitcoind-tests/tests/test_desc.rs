@@ -168,8 +168,8 @@ pub fn test_desc_satisfy(
 
             if let Some(internal_keypair) = internal_keypair {
                 // ---------------------- Tr key spend --------------------
-                let internal_keypair = internal_keypair
-                    .tap_tweak(&secp, tr.spend_info().merkle_root());
+                let internal_keypair =
+                    internal_keypair.tap_tweak(&secp, tr.spend_info().merkle_root());
                 let sighash_msg = sighash_cache
                     .taproot_key_spend_signature_hash(0, &prevouts, sighash_type)
                     .unwrap();
@@ -187,7 +187,8 @@ pub fn test_desc_satisfy(
             let x_only_keypairs_reqd: Vec<(secp256k1::Keypair, TapLeafHash)> = tr
                 .leaves()
                 .flat_map(|leaf| {
-                    let leaf_hash = TapLeafHash::from_script(&leaf.compute_script(), LeafVersion::TapScript);
+                    let leaf_hash =
+                        TapLeafHash::from_script(&leaf.compute_script(), LeafVersion::TapScript);
                     leaf.miniscript().iter_pk().filter_map(move |pk| {
                         let i = x_only_pks.iter().position(|&x| x.to_public_key() == pk);
                         i.map(|idx| (xonly_keypairs[idx], leaf_hash))
@@ -328,7 +329,7 @@ fn find_sk_single_key(pk: bitcoin::PublicKey, testdata: &TestData) -> Vec<secp25
     i.map(|idx| vec![sks[idx]]).unwrap_or(Vec::new())
 }
 
-fn test_descs(cl: &Client, testdata: &TestData) {
+fn test_taproot_descs(cl: &Client, testdata: &TestData) {
     // K : Compressed key available
     // K!: Compressed key with corresponding secret key unknown
     // X: X-only key available
@@ -380,13 +381,21 @@ fn test_descs(cl: &Client, testdata: &TestData) {
     let result = test_desc_satisfy(cl, testdata, "tr(X!,{pk(X1!),pk(X2!)})");
     assert_eq!(result, Err(DescError::PsbtFinalizeError));
 
-    // Test 10: Test taproot desc with ZERO known keys
-    let result = test_desc_satisfy(cl, testdata, "tr(X!,j:multi_a(3,X1!,X2,X3,X4))");
-    assert_eq!(result, Err(DescError::DescParseError));
-
     // Test 11: Test taproot with insufficient known keys
     let result = test_desc_satisfy(cl, testdata, "tr(X!,{pk(X1!),multi_a(3,X2!,X3,X4)})");
     assert_eq!(result, Err(DescError::PsbtFinalizeError));
+}
+
+fn test_descs(cl: &Client, testdata: &TestData) {
+    // Taproot and Bech32m were backported to Core 0.21.1. Use the running
+    // node's version so an explicit executable override is respected.
+    if cl.server_version().unwrap() >= 210_100 {
+        test_taproot_descs(cl, testdata);
+    }
+
+    // Parser failures do not require Taproot support from the node.
+    let result = test_desc_satisfy(cl, testdata, "tr(X!,j:multi_a(3,X1!,X2,X3,X4))");
+    assert_eq!(result, Err(DescError::DescParseError));
 
     // Test 12: size exceeds the limit
     let result = test_desc_satisfy(cl, testdata, "wsh(thresh(1,pk(K1),a:pk(K2),a:pk(K3),a:pk(K4),a:pk(K5),a:pk(K6),a:pk(K7),a:pk(K8),a:pk(K9),a:pk(K10),a:pk(K11),a:pk(K12),a:pk(K13),a:pk(K14),a:pk(K15),a:pk(K16),a:pk(K17),a:pk(K18),a:pk(K19),a:pk(K20),a:pk(K21),a:pk(K22),a:pk(K23),a:pk(K24),a:pk(K25),a:pk(K26),a:pk(K27),a:pk(K28),a:pk(K29),a:pk(K30),a:pk(K31),a:pk(K32),a:pk(K33),a:pk(K34),a:pk(K35),a:pk(K36),a:pk(K37),a:pk(K38),a:pk(K39),a:pk(K40),a:pk(K41),a:pk(K42),a:pk(K43),a:pk(K44),a:pk(K45),a:pk(K46),a:pk(K47),a:pk(K48),a:pk(K49),a:pk(K50),a:pk(K51),a:pk(K52),a:pk(K53),a:pk(K54),a:pk(K55),a:pk(K56),a:pk(K57),a:pk(K58),a:pk(K59),a:pk(K60),a:pk(K61),a:pk(K62),a:pk(K63),a:pk(K64),a:pk(K65),a:pk(K66),a:pk(K67),a:pk(K68),a:pk(K69),a:pk(K70),a:pk(K71),a:pk(K72),a:pk(K73),a:pk(K74),a:pk(K75),a:pk(K76),a:pk(K77),a:pk(K78),a:pk(K79),a:pk(K80),a:pk(K81),a:pk(K82),a:pk(K83),a:pk(K84),a:pk(K85),a:pk(K86),a:pk(K87),a:pk(K88),a:pk(K89),a:pk(K90),a:pk(K91),a:pk(K92),a:pk(K93),a:pk(K94),a:pk(K95),a:pk(K96),a:pk(K97),a:pk(K98),a:pk(K99),a:pk(K100)))");

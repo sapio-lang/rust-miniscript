@@ -273,11 +273,12 @@ fn unknown_tags_are_discoverable_but_cannot_change_a_miniscript_commitment() {
 }
 
 fn next_permutation(values: &mut [usize]) -> bool {
-    let Some(index) = (0..values.len() - 1)
+    let index = match (0..values.len() - 1)
         .rev()
         .find(|&i| values[i] < values[i + 1])
-    else {
-        return false;
+    {
+        Some(index) => index,
+        None => return false,
     };
     let swap = (index + 1..values.len())
         .rev()

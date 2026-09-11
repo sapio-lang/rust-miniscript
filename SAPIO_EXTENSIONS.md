@@ -46,12 +46,13 @@ The `inscription_node_fixture` example and `contrib/check_inscriptions.py` retai
 
 ## Validation
 
-Run the upstream and extension tests together:
+Run the upstream and extension tests together. The first command resolves the
+local lockfile; the remaining commands preserve it:
 
 ```sh
-cargo test --locked --features compiler,serde --lib --tests
-cargo check --locked --no-default-features --features compiler,serde --lib
-cargo build --locked --example inscription_node_fixture
+cargo test -p miniscript --features compiler,serde --lib --tests
+cargo check -p miniscript --locked --no-default-features --features compiler,serde --lib
+cargo build -p miniscript --locked --example inscription_node_fixture
 python3 contrib/check_inscriptions.py --bitcoind /path/to/bitcoind \
   --fixture target/debug/examples/inscription_node_fixture
 ```
@@ -59,3 +60,8 @@ python3 contrib/check_inscriptions.py --bitcoind /path/to/bitcoind \
 Sapio also carries a Bitcoin parser correction rejecting a 65-byte Taproot
 signature with an explicit DEFAULT suffix. Its PSBT tests cover this boundary;
 this fork uses Bitcoin's signature parser instead of maintaining a second one.
+
+The differential fuzz regressions accept only actual Sapio AST nodes as
+extensions to the older upstream grammar. They continue to compare parsing and
+compilation of the shared language. The test-only JSON reader and its MSRV pins
+keep these fixtures compatible with the upstream Rust 1.63 library baseline.

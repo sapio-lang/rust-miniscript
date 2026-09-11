@@ -23,3 +23,11 @@ Run from `rust.yml` unless stated otherwise. Total 11 jobs.
 11. `Format`
 12. `Int-tests`
 13. `Embedded`
+
+## Sapio extension checks
+
+`sapio-extensions.yml` runs the upstream library and all Sapio regression tests
+with `compiler,serde`, checks the two differential fuzz regressions and the
+same code without `std`, and validates the
+26 inscription acceptance vectors against a checksummed Bitcoin Core 31.1.
+The original upstream feature, toolchain, integration, and fuzz jobs remain.

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
-use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use miniscript::bitcoin::consensus::encode::deserialize_hex;
-use miniscript::bitcoin::psbt::{self, Psbt};
+use miniscript::bitcoin::psbt::Psbt;
 use miniscript::bitcoin::sighash::SighashCache;
 //use miniscript::bitcoin::secp256k1; // https://github.com/rust-lang/rust/issues/121684
 use miniscript::bitcoin::{
@@ -51,22 +50,11 @@ fn main() {
 
     println!("Backup3 public key: {}", _backup3_private.public_key(&secp256k1));
 
-    let spend_tx = Transaction {
+    let mut spend_tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::from_consensus(5000),
         input: vec![],
         output: vec![],
-    };
-
-    // Spend one input and spend one output for simplicity.
-    let mut psbt = Psbt {
-        unsigned_tx: spend_tx,
-        unknown: BTreeMap::new(),
-        proprietary: BTreeMap::new(),
-        xpub: BTreeMap::new(),
-        version: 0,
-        inputs: vec![],
-        outputs: vec![],
     };
 
     let hex_tx = "020000000001018ff27041f3d738f5f84fd5ee62f1c5b36afebfb15f6da0c9d1382ddd0eaaa23c0000000000feffffff02b3884703010000001600142ca3b4e53f17991582d47b15a053b3201891df5200e1f50500000000220020c0ebf552acd2a6f5dee4e067daaef17b3521e283aeaa44a475278617e3d2238a0247304402207b820860a9d425833f729775880b0ed59dd12b64b9a3d1ab677e27e4d6b370700220576003163f8420fe0b9dc8df726cff22cbc191104a2d4ae4f9dfedb087fcec72012103817e1da42a7701df4db94db8576f0e3605f3ab3701608b7e56f92321e4d8999100000000";
@@ -85,28 +73,29 @@ fn main() {
         sequence: Sequence::from_height(26),
         ..Default::default()
     };
-    psbt.unsigned_tx.input.push(txin);
+    spend_tx.input.push(txin);
 
-    psbt.unsigned_tx.output.push(TxOut {
+    spend_tx.output.push(TxOut {
         script_pubkey: receiver.script_pubkey(),
         value: Amount::from_sat(amount / 5 - 500),
     });
 
-    psbt.unsigned_tx.output.push(TxOut {
+    spend_tx.output.push(TxOut {
         script_pubkey: bridge_descriptor.script_pubkey(),
         value: Amount::from_sat(amount * 4 / 5),
     });
 
+    // Create one PSBT map for every transaction input and output.
+    let mut psbt = Psbt::from_unsigned_tx(spend_tx).unwrap();
+
     // Generating signatures & witness data
 
-    let mut input = psbt::Input::default();
+    let input = &mut psbt.inputs[0];
     input
         .update_with_descriptor_unchecked(&bridge_descriptor)
         .unwrap();
 
     input.witness_utxo = Some(witness_utxo.clone());
-    psbt.inputs.push(input);
-    psbt.outputs.push(psbt::Output::default());
 
     let mut sighash_cache = SighashCache::new(&psbt.unsigned_tx);
 

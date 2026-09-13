@@ -900,6 +900,11 @@ pub struct Satisfaction<T> {
     pub absolute_timelock: Option<AbsLockTime>,
     /// The relative timelock used by this satisfaction
     pub relative_timelock: Option<RelLockTime>,
+    /// The native CTV commitment executed by this selected (dis)satisfaction.
+    ///
+    /// Distinct commitments cannot execute for the same input. This field is
+    /// meaningful only for a concrete witness stack, not an impossible result.
+    pub tx_template: Option<bitcoin::hashes::sha256::Hash>,
 }
 
 impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
@@ -912,6 +917,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
             has_sig: false,
             relative_timelock: None,
             absolute_timelock: None,
+            tx_template: None,
             stack: Witness::Stack(vec![]),
         }
     }
@@ -923,10 +929,18 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
     /// natural than the opposite order, and more importantly, allows this method to be
     /// used when folding over an iterator of multiple satisfactions.
     fn concatenate_rev(self, other: Self) -> Self {
+        let tx_template = match (self.tx_template, other.tx_template) {
+            (Some(left), Some(right)) if left != right => {
+                return Satisfaction { stack: Witness::Impossible, ..Self::empty() };
+            }
+            (Some(hash), _) | (_, Some(hash)) => Some(hash),
+            (None, None) => None,
+        };
         Satisfaction {
             has_sig: self.has_sig || other.has_sig,
             relative_timelock: cmp::max(self.relative_timelock, other.relative_timelock),
             absolute_timelock: cmp::max(self.absolute_timelock, other.absolute_timelock),
+            tx_template,
             stack: Witness::combine(other.stack, self.stack),
         }
     }
@@ -1054,6 +1068,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             }
         }
         // We are now guaranteed that all elements in `k` satisfactions
@@ -1080,6 +1095,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             }
         } else {
             // Otherwise flatten everything out
@@ -1178,37 +1194,16 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             // If only one has a signature, take the one that doesn't; a
             // third party could malleate by removing the signature, but
             // can't malleate if he'd have to add it
-            (false, true) => Satisfaction {
-                stack: sat1.stack,
-                has_sig: false,
-                relative_timelock: sat1.relative_timelock,
-                absolute_timelock: sat1.absolute_timelock,
-            },
-            (true, false) => Satisfaction {
-                stack: sat2.stack,
-                has_sig: false,
-                relative_timelock: sat2.relative_timelock,
-                absolute_timelock: sat2.absolute_timelock,
-            },
-            // If both have a signature associated with them, choose the
-            // cheaper one (where "cheaper" is defined such that available
-            // things are cheaper than unavailable ones)
-            (true, true) if sat1.stack < sat2.stack => Satisfaction {
-                stack: sat1.stack,
-                has_sig: true,
-                relative_timelock: sat1.relative_timelock,
-                absolute_timelock: sat1.absolute_timelock,
-            },
-            (true, true) => Satisfaction {
-                stack: sat2.stack,
-                has_sig: true,
-                relative_timelock: sat2.relative_timelock,
-                absolute_timelock: sat2.absolute_timelock,
-            },
+            (false, true) => sat1,
+            (true, false) => sat2,
+            // Both require signatures; retain only the cheaper selected branch.
+            (true, true) if sat1.stack < sat2.stack => sat1,
+            (true, true) => sat2,
         }
     }
 
@@ -1221,19 +1216,11 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
             (_, &Witness::Impossible) | (_, &Witness::Unavailable) => return sat1,
             _ => {}
         }
-        let (stack, absolute_timelock, relative_timelock) = if sat1.stack < sat2.stack {
-            (sat1.stack, sat1.absolute_timelock, sat1.relative_timelock)
-        } else {
-            (sat2.stack, sat2.absolute_timelock, sat2.relative_timelock)
-        };
-        Satisfaction {
-            stack,
-            // The fragment is has_sig only if both of the
-            // fragments are has_sig
-            has_sig: sat1.has_sig && sat2.has_sig,
-            relative_timelock,
-            absolute_timelock,
-        }
+        let has_sig = sat1.has_sig && sat2.has_sig;
+        let mut selected = if sat1.stack < sat2.stack { sat1 } else { sat2 };
+        // The fragment has_sig only if both alternatives have_sig.
+        selected.has_sig = has_sig;
+        selected
     }
 
     // produce a non-malleable satisfaction
@@ -1266,6 +1253,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: true,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::PkH(ref pk) => {
                 let wit = Witness::signature::<_, Ctx>(stfr, pk, leaf_hash);
@@ -1277,6 +1265,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                     has_sig: true,
                     relative_timelock: None,
                     absolute_timelock: None,
+                    tx_template: None,
                 }
             }
             Terminal::RawPkH(ref pkh) => Satisfaction {
@@ -1284,6 +1273,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: true,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::After(t) => {
                 let (stack, absolute_timelock) = if stfr.check_after(t.into()) {
@@ -1298,7 +1288,13 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 } else {
                     (Witness::Unavailable, None)
                 };
-                Satisfaction { stack, has_sig: false, relative_timelock: None, absolute_timelock }
+                Satisfaction {
+                    stack,
+                    has_sig: false,
+                    relative_timelock: None,
+                    absolute_timelock,
+                    tx_template: None,
+                }
             }
             Terminal::Older(t) => {
                 let (stack, relative_timelock) = if stfr.check_older(t.into()) {
@@ -1313,53 +1309,67 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 } else {
                     (Witness::Unavailable, None)
                 };
-                Satisfaction { stack, has_sig: false, relative_timelock, absolute_timelock: None }
+                Satisfaction {
+                    stack,
+                    has_sig: false,
+                    relative_timelock,
+                    absolute_timelock: None,
+                    tx_template: None,
+                }
             }
             Terminal::Ripemd160(ref h) => Satisfaction {
                 stack: Witness::ripemd160_preimage(stfr, h),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::Hash160(ref h) => Satisfaction {
                 stack: Witness::hash160_preimage(stfr, h),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::Sha256(ref h) => Satisfaction {
                 stack: Witness::sha256_preimage(stfr, h),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::Hash256(ref h) => Satisfaction {
                 stack: Witness::hash256_preimage(stfr, h),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
-            Terminal::TxTemplate(h) => Satisfaction {
-                stack: if stfr.check_tx_template(h) {
-                    Witness::empty()
-                } else {
-                    Witness::Impossible
-                },
-                has_sig: false,
-                relative_timelock: None,
-                absolute_timelock: None,
-            },
+            Terminal::TxTemplate(h) => {
+                let matches = stfr.check_tx_template(h);
+                Satisfaction {
+                    stack: if matches {
+                        Witness::empty()
+                    } else {
+                        Witness::Impossible
+                    },
+                    tx_template: if matches { Some(h) } else { None },
+                    ..Self::empty()
+                }
+            }
             Terminal::True => Satisfaction {
                 stack: Witness::empty(),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::False => Satisfaction {
                 stack: Witness::Impossible,
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::InscribePre(_, ref sub)
             | Terminal::InscribePost(_, ref sub)
@@ -1385,6 +1395,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                     has_sig: sat.has_sig,
                     relative_timelock: sat.relative_timelock,
                     absolute_timelock: sat.absolute_timelock,
+                    tx_template: sat.tx_template,
                 }
             }
             Terminal::AndV(ref l, ref r) | Terminal::AndB(ref l, ref r) => {
@@ -1471,12 +1482,14 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                         has_sig: l_sat.has_sig,
                         relative_timelock: l_sat.relative_timelock,
                         absolute_timelock: l_sat.absolute_timelock,
+                        tx_template: l_sat.tx_template,
                     },
                     Satisfaction {
                         stack: Witness::combine(r_sat.stack, Witness::push_0()),
                         has_sig: r_sat.has_sig,
                         relative_timelock: r_sat.relative_timelock,
                         absolute_timelock: r_sat.absolute_timelock,
+                        tx_template: r_sat.tx_template,
                     },
                 )
             }
@@ -1523,6 +1536,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                         has_sig: false,
                         relative_timelock: None,
                         absolute_timelock: None,
+                        tx_template: None,
                     }
                 } else {
                     // Throw away the most expensive ones
@@ -1543,6 +1557,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                         has_sig: true,
                         relative_timelock: None,
                         absolute_timelock: None,
+                        tx_template: None,
                     }
                 }
             }
@@ -1576,6 +1591,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                         has_sig: false,
                         relative_timelock: None,
                         absolute_timelock: None,
+                        tx_template: None,
                     }
                 } else {
                     Satisfaction {
@@ -1585,6 +1601,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                         has_sig: true,
                         relative_timelock: None,
                         absolute_timelock: None,
+                        tx_template: None,
                     }
                 }
             }
@@ -1621,6 +1638,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::PkH(ref pk) => Satisfaction {
                 stack: Witness::combine(
@@ -1630,6 +1648,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::RawPkH(ref pkh) => Satisfaction {
                 stack: Witness::combine(
@@ -1639,12 +1658,14 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::False => Satisfaction {
                 stack: Witness::empty(),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::True
             | Terminal::TxTemplate(_)
@@ -1656,6 +1677,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::Sha256(_)
             | Terminal::Hash256(_)
@@ -1665,6 +1687,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::InscribePre(_, ref sub)
             | Terminal::InscribePost(_, ref sub)
@@ -1679,6 +1702,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::AndV(ref v, ref other) => {
                 let vsat =
@@ -1729,6 +1753,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                     has_sig: lnsat.has_sig,
                     relative_timelock: None,
                     absolute_timelock: None,
+                    tx_template: lnsat.tx_template,
                 };
 
                 let rnsat = Self::dissatisfy_helper(
@@ -1744,6 +1769,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                     has_sig: rnsat.has_sig,
                     relative_timelock: None,
                     absolute_timelock: None,
+                    tx_template: rnsat.tx_template,
                 };
 
                 // Dissatisfactions don't need to non-malleable. Use minimum_mall always
@@ -1767,19 +1793,27 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
             Terminal::MultiA(ref thresh) => Satisfaction {
                 stack: Witness::Stack(vec![Placeholder::PushZero; thresh.n()]),
                 has_sig: false,
                 relative_timelock: None,
                 absolute_timelock: None,
+                tx_template: None,
             },
         }
     }
 
     /// Try creating the final witness using a [`Satisfier`]
     pub fn try_completing<Sat: Satisfier<Pk>>(&self, stfr: &Sat) -> Option<Satisfaction<Vec<u8>>> {
-        let Satisfaction { stack, has_sig, relative_timelock, absolute_timelock } = self;
+        let Satisfaction { stack, has_sig, relative_timelock, absolute_timelock, tx_template } =
+            self;
+        if matches!(stack, Witness::Stack(_))
+            && tx_template.map_or(false, |hash| !stfr.check_tx_template(hash))
+        {
+            return None;
+        }
         let stack = match stack {
             Witness::Stack(stack) => Witness::Stack(
                 stack
@@ -1795,6 +1829,7 @@ impl<Pk: MiniscriptKey + ToPublicKey> Satisfaction<Placeholder<Pk>> {
             has_sig: *has_sig,
             relative_timelock: *relative_timelock,
             absolute_timelock: *absolute_timelock,
+            tx_template: *tx_template,
         })
     }
 }
@@ -1832,5 +1867,41 @@ impl Satisfaction<Vec<u8>> {
         Satisfaction::<Placeholder<Pk>>::build_template_mall(term, &stfr, root_has_sig, leaf_hash)
             .try_completing(stfr)
             .expect("the same satisfier should manage to complete the template")
+    }
+}
+
+#[cfg(test)]
+mod ctv_trace_tests {
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::taproot::LeafVersion;
+    use bitcoin::XOnlyPublicKey;
+
+    use super::*;
+    use crate::Tap;
+
+    struct CtvOnly(sha256::Hash);
+    impl Satisfier<XOnlyPublicKey> for CtvOnly {
+        fn check_tx_template(&self, hash: sha256::Hash) -> bool { hash == self.0 }
+    }
+
+    #[test]
+    fn a_false_key_subexpression_retains_the_ctv_check_it_executes() {
+        let hash = sha256::Hash::from_byte_array([1; 32]);
+        let script: Miniscript<XOnlyPublicKey, Tap> = format!(
+            "and_v(txtmpl({}),pk(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798))",
+            hash
+        ).parse().unwrap();
+        let leaf = TapLeafHash::from_script(&script.encode(), LeafVersion::TapScript);
+        type Sat = Satisfaction<Placeholder<XOnlyPublicKey>>;
+        let result = Sat::dissatisfy_helper(
+            &script.node,
+            &CtvOnly(hash),
+            true,
+            &leaf,
+            &mut Sat::minimum,
+            &mut Sat::thresh,
+        );
+        assert_eq!(result.stack, Witness::Stack(vec![Placeholder::PushZero]));
+        assert_eq!(result.tx_template, Some(hash));
     }
 }

@@ -15,6 +15,15 @@
 //!
 //! Once you've obtained signatures, hash pre-images etc required by the plan, it can create a
 //! witness/script_sig for the input.
+//!
+//! Native CTV planning retains the selected input's commitment in [`Plan::tx_template`].
+//! A provider for a fixed transaction should accept only its actual commitment.
+//! For unfunded exploration, run separate providers for each distinct commitment,
+//! plus a provider accepting no commitments for CTV-free paths. Accepting every
+//! commitment at once can make the local cheapest-choice algorithm discard an
+//! alternative needed by an outer conjunction. Distinct commitments combined in
+//! one witness are impossible; they are never silently collapsed into one hash.
+//! Completion rechecks the selected commitment before requesting witness assets.
 
 use core::iter::FromIterator;
 
@@ -224,6 +233,9 @@ pub struct Plan {
     pub absolute_timelock: Option<absolute::LockTime>,
     /// The relative timelock this plan uses
     pub relative_timelock: Option<relative::LockTime>,
+    /// The native CTV commitment executed by the selected spending path.
+    /// Completion rechecks this commitment with the supplied satisfier.
+    pub tx_template: Option<bitcoin::hashes::sha256::Hash>,
     /// The target descriptor for this plan
     pub descriptor: Descriptor<DefiniteDescriptorKey>,
 }
@@ -277,6 +289,12 @@ impl Plan {
     ) -> Result<(Vec<Vec<u8>>, ScriptBuf), Error> {
         use bitcoin::blockdata::script::Builder;
 
+        if self
+            .tx_template
+            .map_or(false, |hash| !stfr.check_tx_template(hash))
+        {
+            return Err(Error::CouldNotSatisfy);
+        }
         let stack = self
             .template
             .iter()

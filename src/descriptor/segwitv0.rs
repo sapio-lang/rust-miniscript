@@ -452,7 +452,13 @@ impl Wpkh<DefiniteDescriptorKey> {
             Witness::Unavailable
         };
 
-        Satisfaction { stack, has_sig: true, relative_timelock: None, absolute_timelock: None }
+        Satisfaction {
+            stack,
+            has_sig: true,
+            relative_timelock: None,
+            absolute_timelock: None,
+            tx_template: None,
+        }
     }
 
     /// Returns a plan if the provided assets are sufficient to produce a malleable satisfaction

@@ -474,6 +474,7 @@ where
             )]),
             has_sig: true,
             absolute_timelock: None,
+            tx_template: None,
             relative_timelock: None,
         }
     } else {
@@ -484,6 +485,7 @@ where
             has_sig: false,
             relative_timelock: None,
             absolute_timelock: None,
+            tx_template: None,
         };
         let mut min_wit_len = None;
         for leaf in spend_info.leaves() {

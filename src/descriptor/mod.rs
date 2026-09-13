@@ -598,6 +598,7 @@ impl Descriptor<DefiniteDescriptorKey> {
                 template: stack,
                 absolute_timelock: satisfaction.absolute_timelock.map(Into::into),
                 relative_timelock: satisfaction.relative_timelock.map(Into::into),
+                tx_template: satisfaction.tx_template,
             })
         } else {
             Err(self)
@@ -628,6 +629,7 @@ impl Descriptor<DefiniteDescriptorKey> {
                 absolute_timelock: satisfaction.absolute_timelock.map(Into::into),
                 // unwrap to be removed in a later commit
                 relative_timelock: satisfaction.relative_timelock.map(Into::into),
+                tx_template: satisfaction.tx_template,
             })
         } else {
             Err(self)
